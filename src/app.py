@@ -10,8 +10,8 @@ from collections.abc import Callable
 
 from fastapi import FastAPI, Header, HTTPException, Query, Response
 
-from src import config, outnote_client
-from src.models import DevicePollRequest, DevicePollResponse, DeviceStartResponse, LinkedIdentity
+from src import browser_auth, config, outnote_client
+from src.models import BrowserCompleteRequest, BrowserStartResponse, DevicePollRequest, DevicePollResponse, DeviceStartResponse, LinkedIdentity
 
 app = FastAPI(title="SchulyMicrosoft", description="Microsoft 365 access for Schuly via OutNote.")
 
@@ -55,6 +55,26 @@ async def device_poll(body: DevicePollRequest):
     if error in ("authorization_pending", "slow_down"):
         return DevicePollResponse(status="pending", message=error)
     return DevicePollResponse(status="error", message=result.get("error_description") or error or "sign-in failed")
+
+
+@app.post("/api/auth/browser/start", response_model=BrowserStartResponse, tags=["Auth"])
+async def browser_start():
+    url, verifier = browser_auth.build_authorize_url()
+    return BrowserStartResponse(authorize_url=url, redirect_uri=browser_auth.NATIVE_REDIRECT, code_verifier=verifier)
+
+
+@app.post("/api/auth/browser/complete", response_model=DevicePollResponse, tags=["Auth"])
+async def browser_complete(body: BrowserCompleteRequest):
+    try:
+        result = await browser_auth.exchange_code(body.code, body.code_verifier)
+    except outnote_client.MicrosoftError as ex:
+        raise HTTPException(status_code=502, detail=str(ex))
+
+    if not result.get("access_token") or not result.get("refresh_token"):
+        return DevicePollResponse(status="error", message=result.get("error_description") or result.get("error") or "sign-in failed")
+    refresh_token = result["refresh_token"]
+    account = await _identity(refresh_token)
+    return DevicePollResponse(status="complete", refresh_token=refresh_token, account=account)
 
 
 @app.get("/api/me", tags=["Microsoft 365"])
