@@ -1,0 +1,61 @@
+# CLAUDE.md — SchulyMicrosoft
+
+Stateless FastAPI service giving Schuly access to a student's own Microsoft 365 data via
+[OutNote](https://github.com/PianoNic/OutNote) (built on [Entrance](https://github.com/PianoNic/Entrance)).
+The Schuly **Microsoft plugin** is the only caller.
+
+## What it is / isn't
+
+- **Stateless.** No database, no stored tokens. The caller owns the FOCI refresh token and
+  sends it back in the `X-MS-Refresh-Token` header; reads return the rotated token in the
+  same response header.
+- Sign-in is the **device-code flow** only — the student authenticates on Microsoft's real
+  page. This service never sees a password. Do **not** add password/credential endpoints.
+- Uses only the **public** OutNote/Entrance API (`outnote.OutNote`, `entrance.Broker`) plus
+  two documented OAuth calls for the device flow. Don't reach into their private modules.
+
+## Code formatting
+
+**Declaration signatures go on one line** — don't wrap a function/method parameter list
+across multiple lines, however long. Call sites, comprehensions and multi-line `if`/`for`
+stay as they are.
+
+## Layout
+
+```
+asgi.py                 # entrypoint (uvicorn on :8010)
+src/
+  app.py                # FastAPI app + routes
+  config.py             # client ids, scopes, endpoints
+  outnote_client.py     # thin OutNote/Entrance wrapper (device start/poll, build_client)
+  models.py             # pydantic DTOs
+tests/                  # pytest, fully mocked (no network)
+```
+
+## Run / test
+
+```sh
+python asgi.py                       # http://localhost:8010  (/docs)
+python -m pytest tests -q            # all mocked, no Microsoft calls
+```
+
+A real local check uses a refresh token from `outnote login` (`.ms_frt`); pass it as the
+`X-MS-Refresh-Token` header. Never commit a token (`.gitignore` covers `.ms_frt`/`*.frt`).
+
+## Versioning / release (KRINT)
+
+`application.properties` (`APP_VERSION=x.y.z`, flat form, like SchulwareAPI) is the source of
+truth. Releasing: `gh release create vX.Y.Z` → `release.yml` syncs the property and builds the
+multi-arch image to `ghcr.io/schulydev/schulymicrosoft` (+ Docker Hub if the org secrets are
+set). `release-drafter` drafts from labeled PRs; `version-bump` is a manual bump.
+
+## Workflow (enforced, KRINT)
+
+Issue (labeled) → branch `feature/<#>_PascalCase` → PR (labeled, body = Summary + `Closes #<n>`)
+→ squash-merge + delete branch. Past-tense commit subjects. **No AI/Claude attribution anywhere.**
+
+## Legal
+
+Reusing Microsoft first-party clients + FOCI is a gray area (see the org-wide legal notes):
+keep this out of app-store builds unless Centerboard/Microsoft terms are cleared. Account
+owner's own data only.
