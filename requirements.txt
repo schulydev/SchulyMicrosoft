@@ -1,0 +1,7 @@
+fastapi==0.122.0
+uvicorn==0.38.0
+httpx==0.28.1
+outnote==1.2.0
+ms-entrance==1.4.0
+pytest==8.3.5
+pytest-asyncio==0.26.0
