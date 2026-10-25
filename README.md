@@ -53,4 +53,4 @@ and [Entrance](https://github.com/PianoNic/Entrance) for the auth mechanics.
 
 ## License
 
-MIT
+PolyForm Noncommercial License 1.0.0
