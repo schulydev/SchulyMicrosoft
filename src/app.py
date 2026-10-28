@@ -88,8 +88,8 @@ async def mail(response: Response, token: str = Header(..., alias=config.REFRESH
 
 
 @app.get("/api/calendar", tags=["Microsoft 365"])
-async def calendar(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), top: int = Query(25, le=100)):
-    return await _read(response, token, lambda note: note.events(top=top))
+async def calendar(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), top: int = Query(25, le=500), start: str | None = Query(None), end: str | None = Query(None)):
+    return await _read(response, token, lambda note: note.events(start=start, end=end, top=top))
 
 
 @app.get("/api/files", tags=["Microsoft 365"])
