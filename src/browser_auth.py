@@ -36,6 +36,7 @@ def build_authorize_url() -> tuple[str, str]:
         "state": secrets.token_urlsafe(16),
         "code_challenge": challenge,
         "code_challenge_method": "S256",
+        "prompt": "select_account",
     })
     return url, verifier
 

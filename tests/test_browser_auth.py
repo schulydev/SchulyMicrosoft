@@ -22,6 +22,7 @@ def test_start_builds_a_pkce_authorize_url():
     assert query["redirect_uri"] == [browser_auth.NATIVE_REDIRECT]
     assert query["code_challenge_method"] == ["S256"]
     assert query["code_challenge"]  # present and non-empty
+    assert query["prompt"] == ["select_account"]
 
 
 class FakeNote:

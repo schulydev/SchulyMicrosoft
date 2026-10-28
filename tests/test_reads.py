@@ -20,6 +20,9 @@ class FakeNote:
     def files(self, path, top):
         return [{"path": path}]
 
+    def events(self, start, end, top):
+        return [{"start": start, "end": end, "top": top}]
+
 
 class FakeBroker:
     def __init__(self, refresh_token, rotate_to=None):
@@ -71,3 +74,10 @@ def test_an_expired_token_maps_to_401(monkeypatch):
     client = TestClient(app)
     r = client.get("/api/files", headers={config.REFRESH_TOKEN_HEADER: "dead"})
     assert r.status_code == 401
+
+
+def test_calendar_passes_the_window(fake_client):
+    client = TestClient(app)
+    r = client.get("/api/calendar", headers={config.REFRESH_TOKEN_HEADER: "old-frt"}, params={"start": "2026-11-01T00:00:00Z", "end": "2026-12-01T00:00:00Z", "top": 300})
+    assert r.status_code == 200
+    assert r.json() == [{"start": "2026-11-01T00:00:00Z", "end": "2026-12-01T00:00:00Z", "top": 300}]
