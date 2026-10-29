@@ -6,6 +6,9 @@ rotate; callers get the rotated token back and own its persistence. Nothing here
 stored server-side.
 """
 
+import hashlib
+import threading
+from collections import OrderedDict
 from collections.abc import Callable
 
 import httpx
@@ -34,9 +37,77 @@ async def poll_device_login(device_code: str, client: httpx.AsyncClient | None =
     return await _post(config.TOKEN_URL, {"grant_type": config.DEVICE_GRANT, "client_id": config.DEVICE_CLIENT_ID, "device_code": device_code}, client)
 
 
+BROKER_CACHE_SIZE = 1000
+
+
+class _SharedBroker(Broker):
+    """A Broker shared by every request that carries the same refresh token.
+
+    Entrance's Broker already keeps one access token per (client id, scope) and only redeems the
+    refresh token (which makes Microsoft rotate it) when that entry is missing or within 60s of
+    expiry. The Broker used to be rebuilt per request, so every call redeemed. Sharing it means
+    repeat calls reuse the minted access tokens and the refresh token stays unchanged. The lock makes
+    concurrent misses redeem once instead of racing; `on_rotate` re-registers the broker under the
+    new token's hash so the caller's next request (which sends the rotated token) still hits."""
+
+    def __init__(self, refresh_token: str, on_rotate: Callable[[str, "_SharedBroker"], None]):
+        super().__init__(refresh_token)
+        self._lock = threading.Lock()
+        self._on_rotate = on_rotate
+
+    def __call__(self, client_id, scope="https://graph.microsoft.com/.default"):
+        with self._lock:
+            before = self.refresh_token
+            token = super().__call__(client_id, scope)
+            if self.refresh_token != before:
+                self._on_rotate(self.refresh_token, self)
+            return token
+
+
+class _BrokerCache:
+    """In-memory LRU of brokers keyed by SHA-256 of the refresh token (the raw token is never a key)."""
+
+    def __init__(self, max_size: int = BROKER_CACHE_SIZE):
+        self._max = max_size
+        self._items: OrderedDict[str, _SharedBroker] = OrderedDict()
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _key(refresh_token: str) -> str:
+        return hashlib.sha256(refresh_token.encode()).hexdigest()
+
+    def get(self, refresh_token: str) -> _SharedBroker:
+        key = self._key(refresh_token)
+        with self._lock:
+            broker = self._items.get(key)
+            if broker is None:
+                broker = _SharedBroker(refresh_token, self._register)
+                self._store(key, broker)
+            else:
+                self._items.move_to_end(key)
+            return broker
+
+    def _register(self, refresh_token: str, broker: _SharedBroker):
+        with self._lock:
+            self._store(self._key(refresh_token), broker)
+
+    def _store(self, key: str, broker: _SharedBroker):
+        self._items[key] = broker
+        self._items.move_to_end(key)
+        while len(self._items) > self._max:
+            self._items.popitem(last=False)
+
+    def clear(self):
+        with self._lock:
+            self._items.clear()
+
+
+_brokers = _BrokerCache()
+
+
 def build_client(refresh_token: str) -> tuple[OutNote, Broker]:
-    """An OutNote client wired to a broker over the caller's refresh token; read `broker.refresh_token` after use for the rotated value."""
-    broker = Broker(refresh_token)
+    """An OutNote client over a shared per-token broker; read `broker.refresh_token` after use for the (possibly rotated) value."""
+    broker = _brokers.get(refresh_token)
     return OutNote(broker), broker
 
 
