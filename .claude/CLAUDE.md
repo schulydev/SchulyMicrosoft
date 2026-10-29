@@ -52,6 +52,7 @@ src/
   people_photos.py      # profile photos by e-mail (mail senders), cached per account
   emojis.py             # Teams emoji catalogue (public CDN, 24 h cache), message emoji parsing, send allowlist
   file_thumbs.py        # file kinds, SharePoint/OneDrive host check, chat file and drive thumbnails
+  file_pdf.py           # Office files as PDF (Graph format=pdf); temp app-folder upload + delete + hourly sweep, converted-host allowlist
   gifs.py               # Giphy search (needs GIPHY_API_KEY; 503 without)
   onenote.py            # OneNote over Graph: notebooks (own + teams), section tree, pages, search, writes, resource stream
   onenote_html.py       # OneNote page HTML allowlist sanitizer (read and write), text-box editability, InkML to SVG
