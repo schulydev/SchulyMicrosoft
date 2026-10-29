@@ -265,6 +265,8 @@ async def calendar(response: Response, token: str = Header(..., alias=config.REF
 
 @app.get("/api/files", tags=["Microsoft 365"])
 async def files(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), path: str = Query("root"), top: int = Query(100, le=1000)):
+    if _has_dot_segment(path) or "%" in path:
+        raise HTTPException(status_code=400, detail="Invalid path.")
     return await _read(response, token, lambda note: note.files(path=path, top=top))
 
 
@@ -717,8 +719,13 @@ def _folder_tree(flat: list[dict], roles: dict[str, str] | None = None) -> list[
 
 
 def _check_id(value: str, pattern: re.Pattern, name: str):
-    if not pattern.fullmatch(value):
+    """The one validator for ids that become upstream path segments: the pattern, and no dot segment ("." / ".." collapse in URL handling and retarget the call)."""
+    if not pattern.fullmatch(value) or _has_dot_segment(value):
         raise HTTPException(status_code=400, detail=f"Invalid {name}.")
+
+
+def _has_dot_segment(value: str) -> bool:
+    return ".." in value or any(part == "." for part in re.split(r"[/\\]", value))
 
 
 def _token_headers(carrier: Response) -> dict[str, str]:
