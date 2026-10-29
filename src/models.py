@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -40,3 +42,41 @@ class DevicePollResponse(BaseModel):
 
 class SendMessageRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=4000, description="Plain text; sent as the signed-in user.")
+
+
+class MailAttachmentIn(BaseModel):
+    name: str
+    contentType: str | None = None
+    contentBase64: str
+
+
+class MailMessageIn(BaseModel):
+    to: list[str] = Field(default_factory=list)
+    cc: list[str] | None = None
+    bcc: list[str] | None = None
+    subject: str
+    body: str
+    html: bool = False
+    attachments: list[MailAttachmentIn] | None = None
+
+
+class MailReplyRequest(BaseModel):
+    comment: str
+    replyAll: bool = False
+
+
+class MailForwardRequest(BaseModel):
+    to: list[str]
+    comment: str = ""
+
+
+class MailReadRequest(BaseModel):
+    read: bool
+
+
+class MailFlagRequest(BaseModel):
+    status: Literal["flagged", "complete", "notFlagged"]
+
+
+class MailMoveRequest(BaseModel):
+    folder: str

@@ -6,16 +6,22 @@ rotate; callers get the rotated token back and own its persistence. Nothing here
 stored server-side.
 """
 
+import asyncio
 import hashlib
+import logging
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Callable
 
+import entrance
 import httpx
 from entrance import Broker
 from outnote import OutNote
 
 from src import config
+
+log = logging.getLogger("schuly.microsoft")
 
 
 class MicrosoftError(Exception):
@@ -111,15 +117,49 @@ def build_client(refresh_token: str) -> tuple[OutNote, Broker]:
     return OutNote(broker), broker
 
 
+_async_client: httpx.AsyncClient | None = None
+
+
+def _http2() -> bool:
+    try:
+        import h2  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def shared_async_client() -> httpx.AsyncClient:
+    """One keep-alive client for the sign-in calls (connect bounded to 5 s, connect retries)."""
+    global _async_client
+    if _async_client is None:
+        _async_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0, connect=5.0),
+            limits=httpx.Limits(max_connections=50, max_keepalive_connections=10, keepalive_expiry=60),
+            transport=httpx.AsyncHTTPTransport(retries=3, http2=_http2()),
+        )
+    return _async_client
+
+
+async def close_shared_client():
+    global _async_client
+    client, _async_client = _async_client, None
+    if client is not None:
+        await client.aclose()
+
+
+async def warm_up():
+    """Open connections to Microsoft's login and Graph hosts so the first real call skips DNS, TCP and TLS."""
+    await asyncio.to_thread(entrance.warm_up, [config.TOKEN_URL, "https://graph.microsoft.com/v1.0/"])
+
+
 async def _post(url: str, data: dict, client: httpx.AsyncClient | None) -> dict:
-    owned = client is None
-    client = client or httpx.AsyncClient(timeout=30.0)
+    client = client or shared_async_client()
+    started = time.perf_counter()
     try:
         response = await client.post(url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
         return response.json()
     finally:
-        if owned:
-            await client.aclose()
+        log.debug("POST %s took %.0f ms", url, (time.perf_counter() - started) * 1000)
 
 
 # Read helpers, kept tiny so routers stay declarative. Each returns plain JSON-able data.

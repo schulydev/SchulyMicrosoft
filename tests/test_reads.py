@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from outnote import GraphError
 
 from src import config, outnote_client
+from src import app as app_module
 from src.app import app
 
 
@@ -15,7 +16,7 @@ class FakeNote:
     def me(self):
         return {"id": "u", "displayName": "Alex"}
 
-    def emails(self, folder, top, unread, search):
+    def emails(self, folder, top, unread, search, select=None):
         return [{"folder": folder, "top": top, "unread": unread, "search": search}]
 
     def files(self, path, top):
@@ -95,9 +96,9 @@ class ChatNote:
     def __init__(self):
         self.calls = []
 
-    def chat_messages(self, chat_id, top=30):
-        self.calls.append(("messages", chat_id, top))
-        return [{"id": "m1", "chat": chat_id, "top": top}]
+    def list(self, path, params=None, limit=None):
+        self.calls.append(("list", path, params, limit))
+        return [{"id": "m1", "chat": path.split("/")[2], "top": limit, "select": params.get("$select")}]
 
     def send_chat_message(self, chat_id, text):
         self.calls.append(("send", chat_id, text))
@@ -143,7 +144,7 @@ def expired(monkeypatch):
 def test_chat_messages_returns_graph_messages_and_rotated_token(chat_note):
     r = TestClient(app).get("/api/chats/19:abc@thread.v2/messages", headers=HEADERS, params={"top": 10})
     assert r.status_code == 200
-    assert r.json() == [{"id": "m1", "chat": "19:abc@thread.v2", "top": 10}]
+    assert r.json() == [{"id": "m1", "chat": "19:abc@thread.v2", "top": 10, "select": app_module.CHAT_MESSAGE_FIELDS}]
     assert r.headers[config.REFRESH_TOKEN_HEADER] == "rotated-frt"
 
 

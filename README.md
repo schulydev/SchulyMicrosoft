@@ -34,7 +34,20 @@ POST /api/auth/browser/complete      { code, code_verifier } → complete (+ ref
 POST /api/auth/device/start          → { user_code, verification_uri, device_code, ... }
 POST /api/auth/device/poll           { device_code } → pending | complete (+ refresh_token, account)
 GET  /api/me                         header X-MS-Refresh-Token
-GET  /api/mail?folder=&top=&unread=&search=  "
+GET  /api/mail?folder=&top=&skip=&unread=&search=  "  (skip pages, not with search; folder: well-known name or folder id)
+GET  /api/mail/folders               "  (nested: childFolders[])
+GET  /api/mail/{id}                  "  (full message incl. body)
+GET  /api/mail/{id}/attachments      "  (metadata only)
+GET  /api/mail/{id}/attachments/{aid} "  (bytes, <= 25 MB, no-store)
+POST /api/mail/send                  { to[], cc?, bcc?, subject, body, html?, attachments?[{name,contentType,contentBase64}] } → 204
+POST /api/mail/drafts                same body → created draft (201)
+POST /api/mail/drafts/{id}/send      → 204
+POST /api/mail/{id}/reply            { comment, replyAll? } → 204
+POST /api/mail/{id}/forward          { to[], comment? } → 204
+POST /api/mail/{id}/read             { read }
+POST /api/mail/{id}/flag             { status: flagged|complete|notFlagged }
+POST /api/mail/{id}/move             { folder } → moved message
+DELETE /api/mail/{id}                → 204
 GET  /api/calendar?top=&start=&end=  "
 GET  /api/files?path=&top=           "
 GET  /api/chats?top=                 "

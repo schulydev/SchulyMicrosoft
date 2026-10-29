@@ -6,7 +6,11 @@ on each read. Reads return the rotated refresh token in the X-MS-Refresh-Token h
 """
 
 import asyncio
+import base64
+import binascii
 import re
+from contextlib import asynccontextmanager
+from urllib.parse import quote
 from collections.abc import Callable
 
 from fastapi import FastAPI, Header, HTTPException, Query, Response
@@ -14,13 +18,35 @@ from fastapi import FastAPI, Header, HTTPException, Query, Response
 from outnote import GraphError
 
 from src import browser_auth, config, outnote_client
-from src.models import BrowserCompleteRequest, BrowserStartResponse, DevicePollRequest, DevicePollResponse, DeviceStartResponse, LinkedIdentity, SendMessageRequest
+from src.models import BrowserCompleteRequest, BrowserStartResponse, DevicePollRequest, DevicePollResponse, DeviceStartResponse, LinkedIdentity, MailFlagRequest, MailForwardRequest, MailMessageIn, MailMoveRequest, MailReadRequest, MailReplyRequest, SendMessageRequest
 
-app = FastAPI(title="SchulyMicrosoft", description="Microsoft 365 access for Schuly via OutNote.")
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # Pre-open the TLS connections to Microsoft in the background: the first call after a cold start otherwise pays DNS, TCP and TLS (and any dead-address timeout) itself.
+    warm = asyncio.create_task(outnote_client.warm_up())
+    yield
+    warm.cancel()
+    await outnote_client.close_shared_client()
+
+
+app = FastAPI(title="SchulyMicrosoft", description="Microsoft 365 access for Schuly via OutNote.", lifespan=lifespan)
 
 CHAT_ID_PATTERN = re.compile(r"[A-Za-z0-9:@._=-]{1,300}")
 USER_ID_PATTERN = re.compile(r"[A-Za-z0-9@._-]{1,200}")
 PHOTO_SIZES = (48, 64, 96, 120, 240)
+GRAPH_ID_PATTERN = re.compile(r"[A-Za-z0-9=_\-+/.]{1,512}")
+EMAIL_PATTERN = re.compile(r"[^@\s<>(),;:\\\"\[\]]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?\.[A-Za-z]{2,}")
+CONTENT_TYPE_PATTERN = re.compile(r"[A-Za-z0-9][\w.+-]{0,126}/[A-Za-z0-9][\w.+-]{0,126}")
+ACTIVE_TYPE_PARTS = ("html", "svg", "xml", "javascript", "ecmascript", "multipart")
+MAX_RECIPIENTS = 100
+MAX_SUBJECT = 255
+MAX_BODY_BYTES = 1024 * 1024
+MAX_SEND_ATTACHMENT_BYTES = 3 * 1024 * 1024
+MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
+# Field lists keep list responses small: no mail body in lists (the single-message route returns it), and no unused chat metadata.
+MAIL_LIST_FIELDS = "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments,importance,conversationId"
+CHAT_FIELDS = "id,topic,chatType,createdDateTime,lastUpdatedDateTime,webUrl,viewpoint"
+CHAT_MESSAGE_FIELDS = "id,chatId,messageType,createdDateTime,lastModifiedDateTime,deletedDateTime,from,body,attachments,mentions,reactions,importance,replyToId,eventDetail"
 
 
 @app.get("/", include_in_schema=False)
@@ -90,8 +116,132 @@ async def me(response: Response, token: str = Header(..., alias=config.REFRESH_T
 
 
 @app.get("/api/mail", tags=["Microsoft 365"])
-async def mail(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), folder: str = Query("inbox"), top: int = Query(25, le=500), unread: bool = Query(False), search: str | None = Query(None)):
-    return await _read(response, token, lambda note: note.emails(folder=folder, top=top, unread=unread, search=search))
+async def mail(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), folder: str = Query("inbox"), top: int = Query(25, ge=1, le=500), skip: int = Query(0, ge=0, le=10000), unread: bool = Query(False), search: str | None = Query(None)):
+    _check_id(folder, GRAPH_ID_PATTERN, "folder")
+    if skip and search:
+        raise HTTPException(status_code=400, detail="skip cannot be combined with search.")
+    if not skip:
+        return await _read(response, token, lambda note: note.emails(folder=_seg(folder), top=top, unread=unread, search=search, select=MAIL_LIST_FIELDS))
+    # Paging: newest first, `skip` messages in. Graph does not allow $skip together with $search.
+    params = {"$top": min(top, 100), "$skip": skip, "$select": MAIL_LIST_FIELDS, "$orderby": "receivedDateTime desc"}
+    if unread:
+        params["$filter"] = "isRead eq false"
+    return await _read(response, token, lambda note: note.list(f"me/mailFolders/{_seg(folder)}/messages", params, limit=top))
+
+
+# Fixed paths (folders/send/drafts) are declared before the {message_id} routes so they can never be read as an id.
+@app.get("/api/mail/folders", tags=["Microsoft 365"])
+async def mail_folders(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    return await _read(response, token, lambda note: _folder_tree(note.mail_folders(include_children=True)))
+
+
+@app.post("/api/mail/send", status_code=204, tags=["Microsoft 365"])
+async def mail_send(body: MailMessageIn, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    args = _message_args(body)
+    return await _no_content(token, lambda note: note.send_mail(**args))
+
+
+@app.post("/api/mail/drafts", status_code=201, tags=["Microsoft 365"])
+async def mail_create_draft(body: MailMessageIn, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    args = _message_args(body)
+    return await _read(response, token, lambda note: note.create_draft(**args))
+
+
+@app.post("/api/mail/drafts/{message_id}/send", status_code=204, tags=["Microsoft 365"])
+async def mail_send_draft(message_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    _check_id(message_id, GRAPH_ID_PATTERN, "message_id")
+    return await _no_content(token, lambda note: note.send_draft(_seg(message_id)))
+
+
+@app.get("/api/mail/{message_id}", tags=["Microsoft 365"])
+async def mail_message(message_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    _check_id(message_id, GRAPH_ID_PATTERN, "message_id")
+    return await _read(response, token, lambda note: note.email(_seg(message_id)))
+
+
+@app.get("/api/mail/{message_id}/attachments", tags=["Microsoft 365"])
+async def mail_attachments(message_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    _check_id(message_id, GRAPH_ID_PATTERN, "message_id")
+    return await _read(response, token, lambda note: [_attachment_meta(a) for a in note.list(f"me/messages/{_seg(message_id)}/attachments")])
+
+
+@app.get("/api/mail/{message_id}/attachments/{attachment_id}", tags=["Microsoft 365"], response_class=Response, responses={200: {"content": {"application/octet-stream": {}}}})
+async def mail_attachment(message_id: str, attachment_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    _check_id(message_id, GRAPH_ID_PATTERN, "message_id")
+    _check_id(attachment_id, GRAPH_ID_PATTERN, "attachment_id")
+
+    def fetch(note):
+        # Look the attachment up in the metadata list first: it carries the type and size, so an oversized one is refused before downloading it.
+        meta = next((a for a in note.list(f"me/messages/{_seg(message_id)}/attachments") if a.get("id") == attachment_id), None)
+        if meta is None:
+            raise HTTPException(status_code=404, detail="Attachment not found.")
+        if (meta.get("size") or 0) > MAX_DOWNLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="The attachment is larger than 25 MB.")
+        try:
+            data = note.download_attachment(_seg(message_id), _seg(attachment_id))
+        except ValueError as ex:
+            raise HTTPException(status_code=422, detail=str(ex))
+        if len(data) > MAX_DOWNLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="The attachment is larger than 25 MB.")
+        return meta, data
+
+    carrier = Response()
+    meta, data = await _read(carrier, token, fetch)
+    name = _safe_name(meta.get("name"))
+    is_item = str(meta.get("@odata.type", "")).endswith("itemAttachment")
+    content_type = _safe_content_type("message/rfc822" if is_item else meta.get("contentType"))
+    if is_item and "." not in name:
+        name += ".eml"
+    headers = _token_headers(carrier)
+    headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(name, safe='')}"
+    headers["Cache-Control"] = "no-store"
+    headers["X-Content-Type-Options"] = "nosniff"
+    headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
+    return Response(content=data, media_type=content_type, headers=headers)
+
+
+@app.post("/api/mail/{message_id}/reply", status_code=204, tags=["Microsoft 365"])
+async def mail_reply(message_id: str, body: MailReplyRequest, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    _check_id(message_id, GRAPH_ID_PATTERN, "message_id")
+    _check_text(body.comment, "comment")
+    return await _no_content(token, lambda note: note.reply(_seg(message_id), body.comment, reply_all=body.replyAll))
+
+
+@app.post("/api/mail/{message_id}/forward", status_code=204, tags=["Microsoft 365"])
+async def mail_forward(message_id: str, body: MailForwardRequest, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    _check_id(message_id, GRAPH_ID_PATTERN, "message_id")
+    _check_text(body.comment, "comment")
+    to = _addresses(body.to, "to")
+    if not to:
+        raise HTTPException(status_code=400, detail="At least one recipient is required.")
+    if len(to) > MAX_RECIPIENTS:
+        raise HTTPException(status_code=400, detail=f"At most {MAX_RECIPIENTS} recipients are allowed.")
+    return await _no_content(token, lambda note: note.forward(_seg(message_id), to, body.comment))
+
+
+@app.post("/api/mail/{message_id}/read", tags=["Microsoft 365"])
+async def mail_mark_read(message_id: str, body: MailReadRequest, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    _check_id(message_id, GRAPH_ID_PATTERN, "message_id")
+    return await _read(response, token, lambda note: note.mark_read(_seg(message_id), body.read) or {"isRead": body.read})
+
+
+@app.post("/api/mail/{message_id}/flag", tags=["Microsoft 365"])
+async def mail_flag(message_id: str, body: MailFlagRequest, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    _check_id(message_id, GRAPH_ID_PATTERN, "message_id")
+    return await _read(response, token, lambda note: note.flag(_seg(message_id), body.status) or {"flag": {"flagStatus": body.status}})
+
+
+@app.post("/api/mail/{message_id}/move", tags=["Microsoft 365"])
+async def mail_move(message_id: str, body: MailMoveRequest, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    _check_id(message_id, GRAPH_ID_PATTERN, "message_id")
+    _check_id(body.folder, GRAPH_ID_PATTERN, "folder")
+    return await _read(response, token, lambda note: note.move_email(_seg(message_id), _seg(body.folder)))
+
+
+@app.delete("/api/mail/{message_id}", status_code=204, tags=["Microsoft 365"])
+async def mail_delete(message_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    _check_id(message_id, GRAPH_ID_PATTERN, "message_id")
+    return await _no_content(token, lambda note: note.delete_email(_seg(message_id)))
 
 
 @app.get("/api/calendar", tags=["Microsoft 365"])
@@ -106,7 +256,7 @@ async def files(response: Response, token: str = Header(..., alias=config.REFRES
 
 @app.get("/api/chats", tags=["Microsoft 365"])
 async def chats(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), top: int = Query(25, le=200)):
-    return await _read(response, token, lambda note: note.chats(top=top))
+    return await _read(response, token, lambda note: note.list("me/chats", {"$top": min(top, 50), "$select": CHAT_FIELDS, "$expand": "members,lastMessagePreview", "$orderby": "lastMessagePreview/createdDateTime desc"}, limit=top))
 
 
 @app.get("/api/notebooks", tags=["Microsoft 365"])
@@ -117,7 +267,7 @@ async def notebooks(response: Response, token: str = Header(..., alias=config.RE
 @app.get("/api/chats/{chat_id}/messages", tags=["Microsoft 365"])
 async def chat_messages(chat_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), top: int = Query(30, ge=1, le=300)):
     _check_id(chat_id, CHAT_ID_PATTERN, "chat_id")
-    return await _read(response, token, lambda note: note.chat_messages(chat_id, top=top))
+    return await _read(response, token, lambda note: note.list(f"me/chats/{chat_id}/messages", {"$top": min(top, 50), "$select": CHAT_MESSAGE_FIELDS}, limit=top))
 
 
 @app.post("/api/chats/{chat_id}/messages", tags=["Microsoft 365"])
@@ -172,16 +322,95 @@ async def _read(response: Response, refresh_token: str, action: Callable[[object
     note, broker = outnote_client.build_client(refresh_token)
     try:
         data = await asyncio.to_thread(action, note)
-    except HTTPException:
+    except HTTPException as ex:
+        # The token may have rotated before the action refused; keep it for the caller.
+        if broker.refresh_token and broker.refresh_token != refresh_token:
+            ex.headers = {**(ex.headers or {}), config.REFRESH_TOKEN_HEADER: broker.refresh_token}
         raise
     except Exception as ex:
         if "invalid_grant" in str(ex):
             raise HTTPException(status_code=401, detail="The Microsoft sign-in expired; reconnect the account.")
+        if isinstance(ex, GraphError) and ex.status == 404:
+            raise HTTPException(status_code=404, detail="Not found in Microsoft 365.")
         raise HTTPException(status_code=502, detail=f"Microsoft Graph error: {ex}")
     # Hand back the rotated refresh token so the caller can persist it.
     if broker.refresh_token and broker.refresh_token != refresh_token:
         response.headers[config.REFRESH_TOKEN_HEADER] = broker.refresh_token
     return data
+
+
+async def _no_content(token: str, action: Callable[[object], object]):
+    carrier = Response()
+    await _read(carrier, token, action)
+    return Response(status_code=204, headers=_token_headers(carrier))
+
+
+def _seg(value: str) -> str:
+    # OutNote does not escape path segments; ids may hold "+" or "/", so percent-encode them for Graph.
+    return quote(value, safe="")
+
+
+def _check_text(value: str, name: str):
+    if len(value.encode("utf-8")) > MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail=f"{name} is larger than 1 MB.")
+
+
+def _addresses(values: list[str] | None, name: str) -> list[str]:
+    out = [v.strip() for v in values or []]
+    for address in out:
+        if len(address) > 254 or not EMAIL_PATTERN.fullmatch(address):
+            raise HTTPException(status_code=400, detail=f"Invalid address in {name}.")
+    return out
+
+
+def _safe_content_type(value: str | None) -> str:
+    # Attachments are untrusted: anything that could run as a page or script is served as opaque bytes.
+    content_type = (value or "").split(";")[0].strip().lower()
+    if not CONTENT_TYPE_PATTERN.fullmatch(content_type) or any(part in content_type for part in ACTIVE_TYPE_PARTS):
+        return "application/octet-stream"
+    return content_type
+
+
+def _safe_name(name: str | None) -> str:
+    cleaned = re.sub(r'[\x00-\x1f\x7f\\/:*?"<>|]', "_", name or "")
+    return cleaned.strip(" .")[:255] or "attachment"
+
+
+def _message_args(body: MailMessageIn) -> dict:
+    to, cc, bcc = _addresses(body.to, "to"), _addresses(body.cc, "cc"), _addresses(body.bcc, "bcc")
+    if not to and not cc and not bcc:
+        raise HTTPException(status_code=400, detail="At least one recipient is required.")
+    if len(to) + len(cc) + len(bcc) > MAX_RECIPIENTS:
+        raise HTTPException(status_code=400, detail=f"At most {MAX_RECIPIENTS} recipients are allowed.")
+    if len(body.subject) > MAX_SUBJECT:
+        raise HTTPException(status_code=400, detail=f"The subject may be at most {MAX_SUBJECT} characters.")
+    _check_text(body.body, "body")
+    attachments, total = [], 0
+    for item in body.attachments or []:
+        try:
+            data = base64.b64decode(item.contentBase64, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=400, detail="An attachment is not valid base64.")
+        total += len(data)
+        if total > MAX_SEND_ATTACHMENT_BYTES:
+            raise HTTPException(status_code=413, detail="Attachments may total at most 3 MB.")
+        attachments.append((_safe_name(item.name), data))
+    return {"to": to, "subject": body.subject, "body": body.body, "html": body.html, "cc": cc or None, "bcc": bcc or None, "attachments": attachments or None}
+
+
+def _attachment_meta(item: dict) -> dict:
+    keep = ("id", "name", "contentType", "size", "isInline", "contentId")
+    return {k: item.get(k) for k in keep}
+
+
+def _folder_tree(flat: list[dict]) -> list[dict]:
+    # OutNote walks the subfolders breadth-first into a flat list; rebuild the nesting from parentFolderId.
+    nodes = {f["id"]: {**f, "childFolders": []} for f in flat}
+    roots = []
+    for f in flat:
+        parent = nodes.get(f.get("parentFolderId"))
+        (parent["childFolders"] if parent is not None and f["id"] != f.get("parentFolderId") else roots).append(nodes[f["id"]])
+    return roots
 
 
 def _check_id(value: str, pattern: re.Pattern, name: str):
