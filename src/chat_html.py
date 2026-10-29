@@ -116,8 +116,11 @@ def text_to_html(text: str) -> str:
 # --- what Graph returns ------------------------------------------------------
 _IMG_TAG = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
 _ATTR = re.compile(r"""([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
-_HOSTED = re.compile(r"/chats/[^/]+/messages/[^/]+/hostedContents/([^/?#]+)/\$value")
-GIF_HOSTS = (".giphy.com", ".tenor.com", ".tenor.googleapis.com")
+_HOSTED_PATH = re.compile(r"/(?:v1\.0|beta)/chats/[^/]+/messages/[^/]+/hostedContents/([^/?#]+)/\$value")
+GRAPH_HOST = "graph.microsoft.com"
+# Exact hosts only (no suffix matching): Giphy's and Tenor's media CDNs, and the sticker hosts seen in received sticker cards.
+GIF_HOSTS = frozenset({"media.giphy.com", "media0.giphy.com", "media1.giphy.com", "media2.giphy.com", "media3.giphy.com", "media4.giphy.com", "i.giphy.com", "media.tenor.com", "media1.tenor.com", "c.tenor.com"})
+STICKER_HOSTS = frozenset({"stickers.newfuture.cc"})
 GIPHY_ITEMTYPE = "http://schema.skype.com/Giphy"
 CARD_PREFIX = "application/vnd.microsoft.card."
 MAX_CARD_CHARS = 64 * 1024
@@ -135,18 +138,33 @@ def _size(value) -> int | None:
     return n if 0 < n <= 4096 else None
 
 
+def _https_host(url: str, hosts: frozenset) -> bool:
+    try:
+        parts = urlsplit(url or "")
+        port = parts.port
+    except ValueError:
+        return False
+    return parts.scheme == "https" and port in (None, 443) and not parts.username and not parts.password and (parts.hostname or "").lower() in hosts
+
+
 def is_gif_host(url: str) -> bool:
-    parts = urlsplit(url or "")
-    host = (parts.hostname or "").lower()
-    return parts.scheme == "https" and any(host.endswith(h) or host == h[1:] for h in GIF_HOSTS)
+    return _https_host(url, GIF_HOSTS)
+
+
+def hosted_content_id(src: str) -> str | None:
+    """The hosted-content id when `src` is exactly a Graph hosted-content URL, else None."""
+    if not _https_host(src, frozenset({GRAPH_HOST})):
+        return None
+    m = _HOSTED_PATH.fullmatch(urlsplit(src).path)
+    return m.group(1) if m else None
 
 
 def media(message: dict) -> list[dict]:
     """Images the body shows, in order: [{kind, url, hostedContentId, alt, width, height}].
 
-    kind "hosted": a pasted image held by Graph; `url` is the src exactly as it appears in the body and
-    `hostedContentId` the id for the hosted-content proxy. kind "gif": a Giphy/Tenor GIF; `url` is the
-    public media URL (only those hosts pass). Other images (emoji, external) are left out."""
+    kind "hosted": a pasted image held by Graph; `url` is null and `hostedContentId` is the id the web
+    passes to the plugin's media proxy. kind "gif": a Giphy/Tenor GIF; `url` is the public media URL
+    (exact allowlisted hosts, https only). Other images (emoji, external) are left out."""
     content = (message.get("body") or {}).get("content") or ""
     out, seen = [], set()
     for tag in _IMG_TAG.findall(content):
@@ -154,9 +172,9 @@ def media(message: dict) -> list[dict]:
         src = a.get("src") or ""
         if src in seen:
             continue
-        hosted = _HOSTED.search(src)
+        hosted = hosted_content_id(src)
         if hosted:
-            item = {"kind": "hosted", "url": src, "hostedContentId": hosted.group(1)}
+            item = {"kind": "hosted", "url": None, "hostedContentId": hosted}
         elif is_gif_host(src):
             item = {"kind": "gif", "url": src, "hostedContentId": None}
         else:
@@ -206,7 +224,7 @@ def _sticker(card) -> dict | None:
     if not isinstance(body, list) or len(body) != 1 or not isinstance(body[0], dict) or body[0].get("type") != "Image":
         return None
     url = body[0].get("url")
-    if not isinstance(url, str) or urlsplit(url).scheme != "https":
+    if not isinstance(url, str) or not (_https_host(url, STICKER_HOSTS) or is_gif_host(url)):
         return None
     return {"url": url, "alt": body[0].get("altText")}
 

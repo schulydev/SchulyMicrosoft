@@ -7,14 +7,19 @@ Without one the search answers 503.
 """
 
 import os
+import time
 
 from entrance import http_client
 
 from src import chat_html
+from src.account_cache import AccountCache, for_broker
 
 API = "https://api.giphy.com/v1/gifs"
 RATING = os.getenv("GIPHY_RATING", "g")
 MAX_LIMIT = 50
+RESULTS_TTL = 300  # identical searches within 5 minutes share one Giphy call
+RATE_PER_MINUTE = 30
+_results = AccountCache(max_items=500)
 
 
 class GifSearchUnavailable(RuntimeError):
@@ -50,10 +55,32 @@ def _shape(item: dict) -> dict | None:
     return {"id": item.get("id"), "title": item.get("title") or "GIF", "url": url, "previewUrl": (preview.get("url") or url).split("?")[0], "width": _int(full.get("width")), "height": _int(full.get("height"))}
 
 
+def allow(broker) -> bool:
+    """A fixed one-minute window per account: at most RATE_PER_MINUTE searches."""
+    cache = for_broker(broker)
+    window = ("gif_rate", int(time.time() // 60))
+    with cache.lock("gif_rate"):
+        used = cache.get(window, 0)
+        if used >= RATE_PER_MINUTE:
+            return False
+        cache.set(window, used + 1, 120)
+    return True
+
+
 def search(query: str | None, limit: int) -> list[dict]:
     key = api_key()
     if not key:
         raise GifSearchUnavailable("GIF search needs a Giphy API key (GIPHY_API_KEY).")
+    cache_key = ((query or "").strip().lower() or None, limit)
+    hit = _results.get(cache_key)
+    if hit is not None:
+        return hit
+    found = _search(key, query, limit)
+    _results.set(cache_key, found, RESULTS_TTL)
+    return found
+
+
+def _search(key: str, query: str | None, limit: int) -> list[dict]:
     params = {"api_key": key, "limit": max(1, min(limit, MAX_LIMIT)), "rating": RATING}
     if query:
         params["q"] = query

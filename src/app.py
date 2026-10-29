@@ -23,7 +23,7 @@ from starlette.datastructures import UploadFile
 
 from outnote import GraphError
 
-from src import browser_auth, chat_html, chat_read, chat_send, config, folder_roles, gifs, outnote_client, teams_chat
+from src import browser_auth, chat_html, chat_read, chat_send, config, folder_roles, gifs, outnote_client, people_photos, teams_chat
 from src.models import BrowserCompleteRequest, BrowserStartResponse, DevicePollRequest, DevicePollResponse, DeviceStartResponse, LinkedIdentity, MailFlagRequest, MailForwardRequest, MailMessageIn, MailMoveRequest, MailReadRequest, MailReplyRequest, MeetingRequest
 
 @asynccontextmanager
@@ -48,6 +48,9 @@ CONTENT_TYPE_PATTERN = re.compile(r"[A-Za-z0-9][\w.+-]{0,126}/[A-Za-z0-9][\w.+-]
 MESSAGE_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 ATTACHMENT_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,100}")
 MAX_CHAT_FILE_BYTES = 100 * 1024 * 1024
+MAX_SEND_BYTES = 105 * 1024 * 1024  # a whole chat send: one 100 MB file plus the message and inline images
+MAX_JSON_SEND_BYTES = 256 * 1024
+TOKEN_PATTERN = re.compile(r"[\x21-\x7e]{4,16384}")  # printable ASCII, no whitespace
 ACTIVE_TYPE_PARTS = ("html", "svg", "xml", "javascript", "ecmascript", "multipart")
 MAX_RECIPIENTS = 100
 MAX_SUBJECT = 255
@@ -307,7 +310,8 @@ async def chat_hosted_content(chat_id: str, message_id: str, hosted_id: str, tok
         raise HTTPException(status_code=415, detail="The hosted content is not a PNG, JPEG, GIF or WEBP image.", headers=headers)
     if len(data) > MAX_DOWNLOAD_BYTES:
         raise HTTPException(status_code=413, detail="The image is larger than 25 MB.", headers=headers)
-    headers["Cache-Control"] = "private, max-age=3600"
+    # The rotated refresh token may ride on this response, so nothing may store it; the plugin caches the image itself.
+    headers["Cache-Control"] = "no-store"
     headers["X-Content-Type-Options"] = "nosniff"
     return Response(content=data, media_type=mime, headers=headers)
 
@@ -347,9 +351,17 @@ async def chat_file(chat_id: str, message_id: str, attachment_id: str, token: st
 async def send_chat_message(chat_id: str, request: Request, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
     """JSON `{content, contentType, importance, mentions, gif}` (or the legacy `{text}`), or multipart/form-data with the same fields (mentions and gif as JSON strings) plus `images` and `files` parts."""
     _check_id(chat_id, CHAT_ID_PATTERN, "chat_id")
+    _check_token(token)
+    multipart = request.headers.get("content-type", "").lower().startswith("multipart/form-data")
+    cap = MAX_SEND_BYTES if multipart else MAX_JSON_SEND_BYTES
+    declared = request.headers.get("content-length")
+    if declared is not None and (not declared.isdigit() or int(declared) > cap):
+        raise HTTPException(status_code=413, detail="The message is larger than the send limit.")
+    request = _limited(request, cap)
     form = None
     try:
-        if request.headers.get("content-type", "").lower().startswith("multipart/form-data"):
+        if multipart:
+            # Starlette spools each file part to a temporary file past 1 MB; form.close() deletes them.
             form = await request.form(max_files=chat_send.MAX_IMAGES + chat_send.MAX_FILES, max_fields=20, max_part_size=256 * 1024)
             fields = {k: form.get(k) for k in ("content", "text", "contentType", "importance") if isinstance(form.get(k), str)}
             fields["mentions"] = _json_field(form.get("mentions"), "mentions")
@@ -408,28 +420,59 @@ async def schedule_chat_meeting(chat_id: str, body: MeetingRequest, response: Re
 
 
 @app.get("/api/gifs/search", tags=["GIFs"])
-async def gif_search(q: str = Query(..., min_length=1, max_length=100), limit: int = Query(24, ge=1, le=50)):
-    return await _gifs(q, limit)
+async def gif_search(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), q: str = Query(..., min_length=1, max_length=100), limit: int = Query(24, ge=1, le=50)):
+    return await _gifs(response, token, q, limit)
 
 
 @app.get("/api/gifs/trending", tags=["GIFs"])
-async def gif_trending(limit: int = Query(24, ge=1, le=50)):
-    return await _gifs(None, limit)
+async def gif_trending(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), limit: int = Query(24, ge=1, le=50)):
+    return await _gifs(response, token, None, limit)
 
 
-async def _gifs(query: str | None, limit: int):
-    try:
-        return await asyncio.to_thread(gifs.search, query, limit)
-    except gifs.GifSearchUnavailable as ex:
-        raise HTTPException(status_code=503, detail=str(ex))
-    except Exception as ex:
-        raise HTTPException(status_code=502, detail=f"GIF search failed: {type(ex).__name__}")
+async def _gifs(response: Response, token: str, query: str | None, limit: int):
+    _check_token(token)
+
+    def run(note, broker):
+        # Only a live Microsoft sign-in may spend the GIF key: the token must mint a Graph token (cached after the first call), and each account is rate limited.
+        broker(config.DEVICE_CLIENT_ID)
+        if not gifs.allow(broker):
+            raise HTTPException(status_code=429, detail="Too many GIF searches; wait a minute.", headers={"Retry-After": "60"})
+        try:
+            return gifs.search(query, limit)
+        except gifs.GifSearchUnavailable as ex:
+            raise HTTPException(status_code=503, detail=str(ex))
+        except Exception as ex:
+            raise HTTPException(status_code=502, detail=f"GIF search failed: {type(ex).__name__}")
+
+    return await _read(response, token, run, with_broker=True)
+
+
+def _check_token(token: str):
+    if not TOKEN_PATTERN.fullmatch(token):
+        raise HTTPException(status_code=401, detail="Missing or malformed Microsoft token.")
 
 
 def _utc(value) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
+
+
+def _limited(request: Request, cap: int) -> Request:
+    """The request with its body cut off past `cap` bytes, whatever Content-Length claims."""
+    received = 0
+    upstream = request.receive
+
+    async def receive():
+        nonlocal received
+        message = await upstream()
+        if message.get("type") == "http.request":
+            received += len(message.get("body", b""))
+            if received > cap:
+                raise HTTPException(status_code=413, detail="The message is larger than the send limit.")
+        return message
+
+    return Request(request.scope, receive)
 
 
 def _json_field(value, name: str):
@@ -496,6 +539,30 @@ async def chat_photo(chat_id: str, token: str = Header(..., alias=config.REFRESH
     headers = _token_headers(carrier)
     if not data:
         raise HTTPException(status_code=404, detail="The chat has no picture.", headers=headers)
+    headers["Cache-Control"] = "no-store"
+    headers["X-Content-Type-Options"] = "nosniff"
+    return Response(content=data, media_type=_image_type(data), headers=headers)
+
+
+@app.get("/api/people/photo", tags=["Microsoft 365"], response_class=Response, responses={200: {"content": {"image/jpeg": {}}}})
+async def people_photo(email: str = Query(..., max_length=254), token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), size: int = Query(48)):
+    """A person's profile photo by e-mail address (mail senders); 404 when they have none or are outside the tenant."""
+    if not EMAIL_PATTERN.fullmatch(email.strip()):
+        raise HTTPException(status_code=400, detail="Invalid email.")
+    if size not in PHOTO_SIZES:
+        raise HTTPException(status_code=400, detail=f"size must be one of {', '.join(str(s) for s in PHOTO_SIZES)}")
+
+    def fetch(note, broker):
+        try:
+            return people_photos.photo(note, broker, email, size)
+        except people_photos.Throttled:
+            raise HTTPException(status_code=429, detail="Microsoft is throttling photo requests.", headers={"Retry-After": "30"})
+
+    carrier = Response()
+    data = await _read(carrier, token, fetch, with_broker=True)
+    headers = _token_headers(carrier)
+    if not data:
+        raise HTTPException(status_code=404, detail="No profile photo for that address.", headers=headers)
     headers["Cache-Control"] = "no-store"
     headers["X-Content-Type-Options"] = "nosniff"
     return Response(content=data, media_type=_image_type(data), headers=headers)
