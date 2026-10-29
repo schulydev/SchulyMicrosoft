@@ -6,14 +6,21 @@ on each read. Reads return the rotated refresh token in the X-MS-Refresh-Token h
 """
 
 import asyncio
+import re
 from collections.abc import Callable
 
 from fastapi import FastAPI, Header, HTTPException, Query, Response
 
+from outnote import GraphError
+
 from src import browser_auth, config, outnote_client
-from src.models import BrowserCompleteRequest, BrowserStartResponse, DevicePollRequest, DevicePollResponse, DeviceStartResponse, LinkedIdentity
+from src.models import BrowserCompleteRequest, BrowserStartResponse, DevicePollRequest, DevicePollResponse, DeviceStartResponse, LinkedIdentity, SendMessageRequest
 
 app = FastAPI(title="SchulyMicrosoft", description="Microsoft 365 access for Schuly via OutNote.")
+
+CHAT_ID_PATTERN = re.compile(r"[A-Za-z0-9:@._=-]{1,300}")
+USER_ID_PATTERN = re.compile(r"[A-Za-z0-9@._-]{1,200}")
+PHOTO_SIZES = (48, 64, 96, 120, 240)
 
 
 @app.get("/", include_in_schema=False)
@@ -107,6 +114,50 @@ async def notebooks(response: Response, token: str = Header(..., alias=config.RE
     return await _read(response, token, lambda note: note.notebooks())
 
 
+@app.get("/api/chats/{chat_id}/messages", tags=["Microsoft 365"])
+async def chat_messages(chat_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), top: int = Query(30, ge=1, le=50)):
+    _check_id(chat_id, CHAT_ID_PATTERN, "chat_id")
+    return await _read(response, token, lambda note: note.chat_messages(chat_id, top=top))
+
+
+@app.post("/api/chats/{chat_id}/messages", tags=["Microsoft 365"])
+async def send_chat_message(chat_id: str, body: SendMessageRequest, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    _check_id(chat_id, CHAT_ID_PATTERN, "chat_id")
+    return await _read(response, token, lambda note: note.send_chat_message(chat_id, body.text))
+
+
+@app.post("/api/chats/{chat_id}/read", status_code=204, tags=["Microsoft 365"])
+async def mark_chat_read(chat_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    _check_id(chat_id, CHAT_ID_PATTERN, "chat_id")
+    carrier = Response()
+    await _read(carrier, token, lambda note: note.mark_chat_read(chat_id))
+    return Response(status_code=204, headers=_token_headers(carrier))
+
+
+@app.get("/api/users/{user_id}/photo", tags=["Microsoft 365"], response_class=Response, responses={200: {"content": {"image/jpeg": {}}}})
+async def user_photo(user_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), size: int = Query(64)):
+    _check_id(user_id, USER_ID_PATTERN, "user_id")
+    if size not in PHOTO_SIZES:
+        raise HTTPException(status_code=400, detail=f"size must be one of {', '.join(str(s) for s in PHOTO_SIZES)}")
+
+    def fetch(note):
+        for path in (f"users/{user_id}/photos/{size}x{size}/$value", f"users/{user_id}/photo/$value"):
+            try:
+                return note.get(path, raw="bytes")
+            except GraphError as ex:
+                if ex.status != 404:
+                    raise
+        return None
+
+    carrier = Response()
+    data = await _read(carrier, token, fetch)
+    headers = _token_headers(carrier)
+    if not data:
+        raise HTTPException(status_code=404, detail="The user has no profile photo.", headers=headers)
+    headers["Cache-Control"] = "private, max-age=3600"
+    return Response(content=data, media_type=_image_type(data), headers=headers)
+
+
 async def _identity(refresh_token: str) -> LinkedIdentity:
     try:
         note, _ = outnote_client.build_client(refresh_token)
@@ -120,6 +171,8 @@ async def _read(response: Response, refresh_token: str, action: Callable[[object
     note, broker = outnote_client.build_client(refresh_token)
     try:
         data = await asyncio.to_thread(action, note)
+    except HTTPException:
+        raise
     except Exception as ex:
         if "invalid_grant" in str(ex):
             raise HTTPException(status_code=401, detail="The Microsoft sign-in expired; reconnect the account.")
@@ -128,3 +181,22 @@ async def _read(response: Response, refresh_token: str, action: Callable[[object
     if broker.refresh_token and broker.refresh_token != refresh_token:
         response.headers[config.REFRESH_TOKEN_HEADER] = broker.refresh_token
     return data
+
+
+def _check_id(value: str, pattern: re.Pattern, name: str):
+    if not pattern.fullmatch(value):
+        raise HTTPException(status_code=400, detail=f"Invalid {name}.")
+
+
+def _token_headers(carrier: Response) -> dict[str, str]:
+    rotated = carrier.headers.get(config.REFRESH_TOKEN_HEADER)
+    return {config.REFRESH_TOKEN_HEADER: rotated} if rotated else {}
+
+
+def _image_type(data: bytes) -> str:
+    # OutNote's public getter returns only the body bytes, so sniff the format from the magic number.
+    if data[1:4] == b"PNG":
+        return "image/png"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return "image/jpeg"

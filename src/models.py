@@ -36,3 +36,7 @@ class DevicePollResponse(BaseModel):
     refresh_token: str | None = None
     account: LinkedIdentity | None = None
     message: str | None = None
+
+
+class SendMessageRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=4000, description="Plain text; sent as the signed-in user.")
