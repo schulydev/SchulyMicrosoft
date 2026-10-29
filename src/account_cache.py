@@ -44,6 +44,12 @@ class AccountCache:
                 while len(self._items) > self._max:
                     del self._items[next(iter(self._items))]
 
+    def discard(self, match):
+        """Drops every entry whose key `match` accepts (a write made them stale)."""
+        with self._guard:
+            for key in [k for k in self._items if match(k)]:
+                del self._items[key]
+
     def lock(self, name: str) -> threading.Lock:
         """A lock per name, so concurrent misses for the same value fetch it once."""
         with self._guard:

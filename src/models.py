@@ -110,3 +110,19 @@ class MailFlagRequest(BaseModel):
 
 class MailMoveRequest(BaseModel):
     folder: str
+
+
+class OneNotePageCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
+    html: str | None = Field(None, description="Rich text for the page body; cut down to the text formatting OneNote keeps.")
+
+
+class OneNoteOutlineUpdate(BaseModel):
+    id: str = Field(..., min_length=1, max_length=200, description="An editable outline id from the page content.")
+    html: str
+
+
+class OneNotePageUpdate(BaseModel):
+    title: str | None = Field(None, min_length=1, max_length=255)
+    outlines: list[OneNoteOutlineUpdate] | None = Field(None, max_length=50)
+    append: str | None = Field(None, description="Rich text appended to the page as a new text box.")

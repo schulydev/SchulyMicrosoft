@@ -27,8 +27,8 @@ from starlette.datastructures import UploadFile
 import entrance
 from outnote import GraphError
 
-from src import password_signin, browser_auth, chat_html, chat_read, chat_send, config, emojis, file_thumbs, folder_roles, gifs, outnote_client, people_photos, teams_chat
-from src.models import PasswordMethodRequest, PasswordOtpRequest, PasswordSignInResponse, PasswordStartRequest, BrowserCompleteRequest, BrowserStartResponse, DevicePollRequest, DevicePollResponse, DeviceStartResponse, LinkedIdentity, MailFlagRequest, MailForwardRequest, MailMessageIn, MailMoveRequest, MailReadRequest, MailReplyRequest, MeetingRequest
+from src import password_signin, browser_auth, chat_html, chat_read, chat_send, config, emojis, file_thumbs, folder_roles, gifs, onenote, onenote_html, outnote_client, people_photos, teams_chat
+from src.models import PasswordMethodRequest, PasswordOtpRequest, PasswordSignInResponse, PasswordStartRequest, BrowserCompleteRequest, BrowserStartResponse, DevicePollRequest, DevicePollResponse, DeviceStartResponse, LinkedIdentity, MailFlagRequest, MailForwardRequest, MailMessageIn, MailMoveRequest, MailReadRequest, MailReplyRequest, MeetingRequest, OneNotePageCreate, OneNotePageUpdate
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -417,6 +417,98 @@ async def chats(response: Response, token: str = Header(..., alias=config.REFRES
 @app.get("/api/notebooks", tags=["Microsoft 365"])
 async def notebooks(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
     return await _read(response, token, lambda note: note.notebooks())
+
+
+@app.get("/api/onenote/notebooks", tags=["OneNote"])
+async def onenote_notebooks(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), teams: bool = Query(True)):
+    """The person's own notebooks, then each joined team's (class notebooks), with where they come from and whether they may be changed."""
+    return await _onenote(response, token, lambda note, broker: onenote.notebooks(note, broker, teams))
+
+
+@app.get("/api/onenote/notebooks/{notebook_id}/sections", tags=["OneNote"])
+async def onenote_sections(notebook_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    """A notebook's sections and section groups as a tree."""
+    _check_onenote_id(notebook_id, "notebook_id")
+    return await _onenote(response, token, lambda note, broker: onenote.tree(note, broker, notebook_id))
+
+
+@app.get("/api/onenote/sections/{section_id}/pages", tags=["OneNote"])
+async def onenote_pages(section_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), top: int = Query(50, ge=1, le=100), skip: int = Query(0, ge=0, le=5000)):
+    """One section's pages in OneNote's order, subpages with their level; `nextSkip` pages on."""
+    _check_onenote_id(section_id, "section_id")
+    return await _onenote(response, token, lambda note, broker: onenote.pages(note, section_id, top, skip))
+
+
+@app.post("/api/onenote/sections/{section_id}/pages", status_code=201, tags=["OneNote"])
+async def onenote_create_page(section_id: str, body: OneNotePageCreate, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    _check_onenote_id(section_id, "section_id")
+    _check_text(body.html or "", "html")
+    return await _onenote(response, token, lambda note, broker: onenote.create_page(note, broker, section_id, body.title, body.html))
+
+
+@app.get("/api/onenote/pages/{page_id}", tags=["OneNote"])
+async def onenote_page(page_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    """A page as sanitized HTML (pictures by resource id, ink as SVG), its resources and its text boxes."""
+    _check_onenote_id(page_id, "page_id")
+    return await _onenote(response, token, lambda note, broker: onenote.page(note, page_id))
+
+
+@app.patch("/api/onenote/pages/{page_id}", tags=["OneNote"])
+async def onenote_update_page(page_id: str, body: OneNotePageUpdate, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    """Replaces the title and the text of editable text boxes, and appends text, as Graph PATCH commands. Answers the page as it is after the save."""
+    _check_onenote_id(page_id, "page_id")
+    outlines = [{"id": o.id, "html": o.html} for o in body.outlines or []]
+    for item in outlines:
+        _check_id(item["id"], onenote_html.SAFE_ID, "outline id")
+    _check_text((body.append or "") + "".join(o["html"] for o in outlines), "html")
+    return await _onenote(response, token, lambda note, broker: onenote.update_page(note, broker, page_id, body.title, outlines, body.append))
+
+
+@app.delete("/api/onenote/pages/{page_id}", status_code=204, tags=["OneNote"])
+async def onenote_delete_page(page_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    _check_onenote_id(page_id, "page_id")
+    carrier = Response()
+    await _onenote(carrier, token, lambda note, broker: onenote.delete_page(note, broker, page_id))
+    return Response(status_code=204, headers=_token_headers(carrier))
+
+
+@app.get("/api/onenote/resources/{resource_id}", tags=["OneNote"], response_class=Response, responses={200: {"content": {"image/png": {}, "application/octet-stream": {}}}})
+async def onenote_resource(resource_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), kind: str = Query("image"), name: str | None = Query(None, max_length=255)):
+    """A picture (kind=image, served inline only when it is a PNG, JPEG, GIF or WEBP) or an attached file (kind=file, always a download) of a page."""
+    _check_onenote_id(resource_id, "resource_id")
+    if kind not in ("image", "file"):
+        raise HTTPException(status_code=400, detail="kind must be image or file")
+
+    def fetch(note, broker):
+        try:
+            return onenote.resource(broker, resource_id, MAX_DOWNLOAD_BYTES)
+        except onenote.ResourceTooLarge:
+            raise HTTPException(status_code=413, detail="The resource is larger than 25 MB.")
+
+    carrier = Response()
+    data = await _onenote(carrier, token, fetch)
+    headers = _token_headers(carrier)
+    # The rotated refresh token may ride on this response, so nothing may store it; the plugin caches images itself.
+    headers["Cache-Control"] = "no-store"
+    headers["X-Content-Type-Options"] = "nosniff"
+    if kind == "image":
+        mime = chat_send.image_type((data or b"")[:12])
+        if mime is None:
+            raise HTTPException(status_code=415, detail="The resource is not a PNG, JPEG, GIF or WEBP image.", headers=headers)
+        return Response(content=data, media_type=mime, headers=headers)
+    headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(_safe_name(name), safe='')}"
+    headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
+    return Response(content=data, media_type="application/octet-stream", headers=headers)
+
+
+@app.get("/api/onenote/search", tags=["OneNote"])
+async def onenote_search(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), q: str = Query(..., min_length=1, max_length=100), notebook: str | None = Query(None), top: int = Query(25, ge=1, le=50)):
+    """Pages whose title holds `q` (Graph has no OneNote content search), in one notebook or everywhere. `partial` is true when a big class notebook was only searched in part."""
+    if not q.strip():
+        raise HTTPException(status_code=400, detail="q is empty.")
+    if notebook:
+        _check_onenote_id(notebook, "notebook")
+    return await _onenote(response, token, lambda note, broker: onenote.search(note, broker, q, notebook, top))
 
 
 @app.get("/api/chats/{chat_id}/messages", tags=["Microsoft 365"])
@@ -928,6 +1020,31 @@ def _folder_tree(flat: list[dict], roles: dict[str, str] | None = None) -> list[
         parent = nodes.get(f.get("parentFolderId"))
         (parent["childFolders"] if parent is not None and f["id"] != f.get("parentFolderId") else roots).append(nodes[f["id"]])
     return roots
+
+
+def _check_onenote_id(value: str, name: str):
+    """OneNote ids (bare, or `<group>@<id>` for a team's notebook) through the shared validator, then the scope check."""
+    _check_id(value, onenote.ID_PATTERN, name)
+    if not onenote.is_id(value):
+        raise HTTPException(status_code=400, detail=f"Invalid {name}.")
+
+
+async def _onenote(response: Response, token: str, action: Callable[..., object]):
+    """`_read` for OneNote: refusals OneNote gives as such keep their meaning instead of becoming a 502."""
+
+    def run(note, broker):
+        try:
+            return action(note, broker)
+        except onenote.OneNoteError as ex:
+            raise HTTPException(status_code=ex.status, detail=str(ex))
+        except GraphError as ex:
+            if ex.status == 403:
+                raise HTTPException(status_code=403, detail="OneNote refused access to this notebook.")
+            if ex.status in (400, 409, 422):
+                raise HTTPException(status_code=422, detail=f"OneNote refused the request: {str(ex)[:200]}")
+            raise
+
+    return await _read(response, token, run, with_broker=True)
 
 
 def _check_id(value: str, pattern: re.Pattern, name: str):

@@ -53,6 +53,8 @@ src/
   emojis.py             # Teams emoji catalogue (public CDN, 24 h cache), message emoji parsing, send allowlist
   file_thumbs.py        # file kinds, SharePoint/OneDrive host check, chat file and drive thumbnails
   gifs.py               # Giphy search (needs GIPHY_API_KEY; 503 without)
+  onenote.py            # OneNote over Graph: notebooks (own + teams), section tree, pages, search, writes, resource stream
+  onenote_html.py       # OneNote page HTML allowlist sanitizer (read and write), text-box editability, InkML to SVG
 tests/                  # pytest, fully mocked (no network)
 ```
 

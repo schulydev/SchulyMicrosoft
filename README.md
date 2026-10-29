@@ -69,6 +69,15 @@ GET  /api/calendar?top=&start=&end=  "
 GET  /api/files?path=&top=           "
 GET  /api/chats?top=                 "
 GET  /api/notebooks                  "
+GET  /api/onenote/notebooks?teams=   "  (own, then each joined team's / class notebooks; ids of a team's are <group>@<id>)
+GET  /api/onenote/notebooks/{id}/sections          "  (tree: sections and section groups)
+GET  /api/onenote/sections/{id}/pages?top=&skip=  "  (top <= 100, nextSkip pages on, level = subpage indent)
+POST /api/onenote/sections/{id}/pages             { title, html? } → created page (201)
+GET  /api/onenote/pages/{id}                       "  (sanitized html, resources, outlines, ink as SVG)
+PATCH /api/onenote/pages/{id}                      { title?, outlines?[{id, html}], append? } → page after the save
+DELETE /api/onenote/pages/{id}                     → 204
+GET  /api/onenote/resources/{id}?kind=image|file&name=  "  (image inline, file as download, <= 25 MB, no-store)
+GET  /api/onenote/search?q=&notebook=&top=         "  (page titles; partial when a class notebook was searched in part)
 GET  /api/chats/{id}/messages?top=   "  (newest first, top <= 50)
 POST /api/chats/{id}/messages        { text } (1-4000 chars) → created message
 POST /api/chats/{id}/read            → 204
