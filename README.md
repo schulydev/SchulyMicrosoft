@@ -89,6 +89,10 @@ POST /api/chats/{id}/read            → 204
 GET  /api/users/{id}/photo?size=     "  (48|64|96|120|240) → image bytes, 404 if none
 GET  /api/chats/{id}/messages/{mid}/files/{fid}/thumbnail?size=  small|medium|large → JPEG/PNG/WEBP, 404 if none
 GET  /api/files/{itemId}/thumbnail?size=                          "  (OneDrive item)
+GET  /api/files/{itemId}/pdf                                      Office file as PDF (inline, no-store, sandboxed; 415 if not convertible)
+GET  /api/chats/{id}/messages/{mid}/files/{fid}/pdf               "  (chat file, converted where it lives)
+GET  /api/mail/{id}/attachments/{aid}/pdf                         "  (<= 25 MB, via a temporary app-folder file)
+POST /api/convert/pdf?name=                                       raw bytes (<= 105 MB) → PDF, via a temporary app-folder file
 GET  /api/emojis/catalogue?locale=  Teams emoji catalogue (no token, cached 24 h)
 GET  /api/emojis/custom/{documentId}?animated=  tenant custom emoji image (message emojis[].documentId)
 ```

@@ -13,6 +13,7 @@ import hmac
 import os
 import json
 import logging
+import posixpath
 import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -29,7 +30,7 @@ from starlette.datastructures import UploadFile
 import entrance
 from outnote import GraphError
 
-from src import password_signin, browser_auth, chat_html, chat_read, chat_send, config, emojis, file_thumbs, folder_roles, gifs, onenote, onenote_html, outnote_client, people_photos, teams_chat
+from src import password_signin, browser_auth, chat_html, chat_read, chat_send, config, emojis, file_pdf, file_thumbs, folder_roles, gifs, onenote, onenote_html, outnote_client, people_photos, teams_chat
 from src.models import PasswordMethodRequest, PasswordOtpRequest, PasswordSignInResponse, PasswordStartRequest, BrowserCompleteRequest, BrowserStartResponse, DevicePollRequest, DevicePollResponse, DeviceStartResponse, LinkedIdentity, MailFlagRequest, MailForwardRequest, MailMessageIn, MailMoveRequest, MailReadRequest, MailReplyRequest, MeetingRequest, OneNotePageCreate, OneNotePageUpdate
 
 @asynccontextmanager
@@ -364,6 +365,31 @@ async def mail_attachment(message_id: str, attachment_id: str, token: str = Head
     return Response(content=data, media_type=content_type, headers=headers)
 
 
+@app.get("/api/mail/{message_id}/attachments/{attachment_id}/pdf", tags=["Files as PDF"], response_class=StreamingResponse, responses={200: {"content": {"application/pdf": {}}}})
+async def mail_attachment_pdf(message_id: str, attachment_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    """A mail attachment (Word, Excel, PowerPoint, OpenDocument, RTF, CSV) converted to PDF through a temporary file in the app folder. 415 when the type can't be converted."""
+    _check_id(message_id, GRAPH_ID_PATTERN, "message_id")
+    _check_id(attachment_id, GRAPH_ID_PATTERN, "attachment_id")
+
+    def convert(note, broker):
+        meta = next((a for a in note.list(f"me/messages/{_seg(message_id)}/attachments") if a.get("id") == attachment_id), None)
+        if meta is None:
+            raise HTTPException(status_code=404, detail="Attachment not found.")
+        if str(meta.get("@odata.type", "")).endswith("itemAttachment") or not file_pdf.is_convertible(meta.get("name")):
+            raise HTTPException(status_code=415, detail="This file type cannot be converted to PDF.")
+        if (meta.get("size") or 0) > MAX_DOWNLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="The attachment is larger than 25 MB.")
+        try:
+            data = note.download_attachment(_seg(message_id), _seg(attachment_id))
+        except ValueError as ex:
+            raise HTTPException(status_code=422, detail=str(ex))
+        if len(data) > MAX_DOWNLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="The attachment is larger than 25 MB.")
+        return meta.get("name"), _converted(lambda: file_pdf.bytes_pdf(note, broker, data, meta.get("name")))
+
+    return await _pdf(token, convert)
+
+
 @app.post("/api/mail/{message_id}/reply", status_code=204, tags=["Microsoft 365"])
 async def mail_reply(message_id: str, body: MailReplyRequest, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
     _check_id(message_id, GRAPH_ID_PATTERN, "message_id")
@@ -633,6 +659,106 @@ async def _thumbnail(token: str, fetch):
     headers["Cache-Control"] = "no-store"
     headers["X-Content-Type-Options"] = "nosniff"
     return Response(content=data, media_type=mime, headers=headers)
+
+
+@app.get("/api/files/{item_id}/pdf", tags=["Files as PDF"], response_class=StreamingResponse, responses={200: {"content": {"application/pdf": {}}}})
+async def drive_item_pdf(item_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    """A OneDrive item (an `id` from /api/files) converted to PDF by Microsoft 365. 415 when the type can't be converted."""
+    _check_id(item_id, DRIVE_ITEM_PATTERN, "item_id")
+
+    def convert(note, broker):
+        item = note.get(f"me/drive/items/{_seg(item_id)}", {"$select": "id,name,size,file"})
+        _check_source(item)
+        return item.get("name"), _converted(lambda: file_pdf.drive_item_pdf(note, item_id))
+
+    return await _pdf(token, convert)
+
+
+@app.get("/api/chats/{chat_id}/messages/{message_id}/files/{attachment_id}/pdf", tags=["Files as PDF"], response_class=StreamingResponse, responses={200: {"content": {"application/pdf": {}}}})
+async def chat_file_pdf(chat_id: str, message_id: str, attachment_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    """A file shared in a chat message (`files[].id`) converted to PDF where it lives (SharePoint / OneDrive). 415 when the type can't be converted."""
+    _check_id(chat_id, CHAT_ID_PATTERN, "chat_id")
+    _check_id(message_id, MESSAGE_ID_PATTERN, "message_id")
+    _check_id(attachment_id, ATTACHMENT_ID_PATTERN, "attachment_id")
+
+    def convert(note, broker):
+        message = note.get(chat_read.message_path(chat_id, message_id))
+        ref = next((f for f in chat_html.reference_files(message) if f.get("id") == attachment_id), None)
+        if ref is None:
+            raise HTTPException(status_code=404, detail="File not found in the message.")
+        if not file_thumbs.is_share_url(ref.get("contentUrl")):
+            raise HTTPException(status_code=415, detail="Only files in SharePoint or OneDrive can be converted.")
+        item = note.get(chat_read.drive_item_path(ref["contentUrl"], "id,name,size,file,parentReference"))
+        _check_source(item)
+        drive_id = (item.get("parentReference") or {}).get("driveId")
+        if not file_thumbs.safe_graph_id(drive_id) or not file_thumbs.safe_graph_id(item.get("id")):
+            raise HTTPException(status_code=404, detail="File not found.")
+        return item.get("name"), _converted(lambda: file_pdf.drive_item_pdf(note, item["id"], drive_id))
+
+    return await _pdf(token, convert)
+
+
+@app.post("/api/convert/pdf", tags=["Files as PDF"], response_class=StreamingResponse, responses={200: {"content": {"application/pdf": {}}}})
+async def convert_pdf(request: Request, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), name: str = Query(..., min_length=1, max_length=255)):
+    """The request body (raw bytes, up to 105 MB) converted to PDF; `name` is the file name, whose extension picks the type (Word, Excel, PowerPoint, OpenDocument, RTF, CSV).
+
+    For files that aren't in a drive: they go to a temporary file in the app folder, which is deleted right after the conversion."""
+    _check_token(token)
+    safe = _safe_name(name)
+    if not file_pdf.is_convertible(safe):
+        raise HTTPException(status_code=415, detail="This file type cannot be converted to PDF.")
+    declared = request.headers.get("content-length")
+    if declared is not None and (not declared.isdigit() or int(declared) > MAX_SEND_BYTES):
+        raise HTTPException(status_code=413, detail="The file is larger than the conversion limit.")
+    body = bytearray()
+    async for chunk in _limited(request, MAX_SEND_BYTES).stream():
+        body.extend(chunk)
+    if not body:
+        raise HTTPException(status_code=400, detail="The body is empty.")
+    data = bytes(body)
+    del body
+    return await _pdf(token, lambda note, broker: (safe, _converted(lambda: file_pdf.bytes_pdf(note, broker, data, safe))))
+
+
+def _check_source(item: dict):
+    if not isinstance(item, dict) or item.get("file") is None:
+        raise HTTPException(status_code=404, detail="File not found.")
+    if not file_pdf.is_convertible(item.get("name")):
+        raise HTTPException(status_code=415, detail="This file type cannot be converted to PDF.")
+    if (item.get("size") or 0) > MAX_CHAT_FILE_BYTES:
+        raise HTTPException(status_code=413, detail="The file is larger than 100 MB.")
+
+
+def _converted(run):
+    try:
+        return run()
+    except file_pdf.ConvertError as ex:
+        raise HTTPException(status_code=ex.status, detail=str(ex))
+
+
+async def _pdf(token: str, convert):
+    """Runs `convert(note, broker) -> (source name, spooled PDF)` and streams the PDF: inline (it was checked to be a PDF), sandboxed, never stored."""
+    carrier = Response()
+    name, spooled = await _read(carrier, token, convert, with_broker=True)
+    headers = _token_headers(carrier)
+    pdf_name = posixpath.splitext(_safe_name(name))[0] + ".pdf"
+    headers["Content-Disposition"] = f"inline; filename*=UTF-8''{quote(pdf_name, safe='')}"
+    # The rotated refresh token may ride on this response, so nothing may store it.
+    headers["Cache-Control"] = "no-store"
+    headers["X-Content-Type-Options"] = "nosniff"
+    headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
+    size = spooled.seek(0, 2)
+    spooled.seek(0)
+    headers["Content-Length"] = str(size)
+
+    def body():
+        try:
+            while chunk := spooled.read(64 * 1024):
+                yield chunk
+        finally:
+            spooled.close()
+
+    return StreamingResponse(body(), media_type="application/pdf", headers=headers)
 
 
 @app.get("/api/emojis/catalogue", tags=["Emojis"])
