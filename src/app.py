@@ -154,7 +154,8 @@ async def user_photo(user_id: str, token: str = Header(..., alias=config.REFRESH
     headers = _token_headers(carrier)
     if not data:
         raise HTTPException(status_code=404, detail="The user has no profile photo.", headers=headers)
-    headers["Cache-Control"] = "private, max-age=3600"
+    # The rotated refresh token rides on this response, so nothing may store it; the caller caches the photo itself.
+    headers["Cache-Control"] = "no-store"
     return Response(content=data, media_type=_image_type(data), headers=headers)
 
 

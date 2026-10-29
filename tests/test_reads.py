@@ -204,7 +204,7 @@ def test_user_photo_returns_bytes_cache_header_and_rotated_token(chat_note):
     assert r.status_code == 200
     assert r.content == JPEG
     assert r.headers["content-type"] == "image/jpeg"
-    assert r.headers["cache-control"] == "private, max-age=3600"
+    assert r.headers["cache-control"] == "no-store"
     assert r.headers[config.REFRESH_TOKEN_HEADER] == "rotated-frt"
     assert chat_note.calls == [("get", "users/alex@school.ch/photos/96x96/$value", "bytes")]
 
