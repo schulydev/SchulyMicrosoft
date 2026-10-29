@@ -90,7 +90,7 @@ async def me(response: Response, token: str = Header(..., alias=config.REFRESH_T
 
 
 @app.get("/api/mail", tags=["Microsoft 365"])
-async def mail(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), folder: str = Query("inbox"), top: int = Query(25, le=100), unread: bool = Query(False), search: str | None = Query(None)):
+async def mail(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), folder: str = Query("inbox"), top: int = Query(25, le=500), unread: bool = Query(False), search: str | None = Query(None)):
     return await _read(response, token, lambda note: note.emails(folder=folder, top=top, unread=unread, search=search))
 
 
@@ -100,12 +100,12 @@ async def calendar(response: Response, token: str = Header(..., alias=config.REF
 
 
 @app.get("/api/files", tags=["Microsoft 365"])
-async def files(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), path: str = Query("root"), top: int = Query(100, le=200)):
+async def files(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), path: str = Query("root"), top: int = Query(100, le=1000)):
     return await _read(response, token, lambda note: note.files(path=path, top=top))
 
 
 @app.get("/api/chats", tags=["Microsoft 365"])
-async def chats(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), top: int = Query(25, le=50)):
+async def chats(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), top: int = Query(25, le=200)):
     return await _read(response, token, lambda note: note.chats(top=top))
 
 
@@ -115,7 +115,7 @@ async def notebooks(response: Response, token: str = Header(..., alias=config.RE
 
 
 @app.get("/api/chats/{chat_id}/messages", tags=["Microsoft 365"])
-async def chat_messages(chat_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), top: int = Query(30, ge=1, le=50)):
+async def chat_messages(chat_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), top: int = Query(30, ge=1, le=300)):
     _check_id(chat_id, CHAT_ID_PATTERN, "chat_id")
     return await _read(response, token, lambda note: note.chat_messages(chat_id, top=top))
 
