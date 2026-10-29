@@ -8,17 +8,23 @@ on each read. Reads return the rotated refresh token in the X-MS-Refresh-Token h
 import asyncio
 import base64
 import binascii
+import json
+import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import timezone
 from urllib.parse import quote
 from collections.abc import Callable
 
-from fastapi import FastAPI, Header, HTTPException, Query, Response
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.responses import StreamingResponse
+from starlette.datastructures import UploadFile
 
 from outnote import GraphError
 
-from src import browser_auth, config, outnote_client
-from src.models import BrowserCompleteRequest, BrowserStartResponse, DevicePollRequest, DevicePollResponse, DeviceStartResponse, LinkedIdentity, MailFlagRequest, MailForwardRequest, MailMessageIn, MailMoveRequest, MailReadRequest, MailReplyRequest, SendMessageRequest
+from src import browser_auth, chat_html, chat_read, chat_send, config, folder_roles, gifs, outnote_client, teams_chat
+from src.models import BrowserCompleteRequest, BrowserStartResponse, DevicePollRequest, DevicePollResponse, DeviceStartResponse, LinkedIdentity, MailFlagRequest, MailForwardRequest, MailMessageIn, MailMoveRequest, MailReadRequest, MailReplyRequest, MeetingRequest
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -29,6 +35,8 @@ async def lifespan(_: FastAPI):
     await outnote_client.close_shared_client()
 
 
+log = logging.getLogger("schuly.microsoft")
+
 app = FastAPI(title="SchulyMicrosoft", description="Microsoft 365 access for Schuly via OutNote.", lifespan=lifespan)
 
 CHAT_ID_PATTERN = re.compile(r"[A-Za-z0-9:@._=-]{1,300}")
@@ -37,6 +45,9 @@ PHOTO_SIZES = (48, 64, 96, 120, 240)
 GRAPH_ID_PATTERN = re.compile(r"[A-Za-z0-9=_\-+/.]{1,512}")
 EMAIL_PATTERN = re.compile(r"[^@\s<>(),;:\\\"\[\]]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?\.[A-Za-z]{2,}")
 CONTENT_TYPE_PATTERN = re.compile(r"[A-Za-z0-9][\w.+-]{0,126}/[A-Za-z0-9][\w.+-]{0,126}")
+MESSAGE_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
+ATTACHMENT_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,100}")
+MAX_CHAT_FILE_BYTES = 100 * 1024 * 1024
 ACTIVE_TYPE_PARTS = ("html", "svg", "xml", "javascript", "ecmascript", "multipart")
 MAX_RECIPIENTS = 100
 MAX_SUBJECT = 255
@@ -132,7 +143,7 @@ async def mail(response: Response, token: str = Header(..., alias=config.REFRESH
 # Fixed paths (folders/send/drafts) are declared before the {message_id} routes so they can never be read as an id.
 @app.get("/api/mail/folders", tags=["Microsoft 365"])
 async def mail_folders(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
-    return await _read(response, token, lambda note: _folder_tree(note.mail_folders(include_children=True)))
+    return await _read(response, token, _folders, with_broker=True)
 
 
 @app.post("/api/mail/send", status_code=204, tags=["Microsoft 365"])
@@ -256,7 +267,18 @@ async def files(response: Response, token: str = Header(..., alias=config.REFRES
 
 @app.get("/api/chats", tags=["Microsoft 365"])
 async def chats(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), top: int = Query(25, le=200)):
-    return await _read(response, token, lambda note: note.list("me/chats", {"$top": min(top, 50), "$select": CHAT_FIELDS, "$expand": "members,lastMessagePreview", "$orderby": "lastMessagePreview/createdDateTime desc"}, limit=top))
+    def fetch(note, broker):
+        items = note.list("me/chats", {"$top": min(top, 50), "$select": CHAT_FIELDS, "$expand": "members,lastMessagePreview", "$orderby": "lastMessagePreview/createdDateTime desc"}, limit=top)
+        try:
+            return teams_chat.mark_images(broker, items)
+        except Exception as ex:
+            # The picture flag is a nicety; the chat list never fails over it.
+            log.info("chat picture lookup failed: %s", type(ex).__name__)
+            for item in items:
+                item["hasImage"] = False
+            return items
+
+    return await _read(response, token, fetch, with_broker=True)
 
 
 @app.get("/api/notebooks", tags=["Microsoft 365"])
@@ -267,13 +289,185 @@ async def notebooks(response: Response, token: str = Header(..., alias=config.RE
 @app.get("/api/chats/{chat_id}/messages", tags=["Microsoft 365"])
 async def chat_messages(chat_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), top: int = Query(30, ge=1, le=300)):
     _check_id(chat_id, CHAT_ID_PATTERN, "chat_id")
-    return await _read(response, token, lambda note: note.list(f"me/chats/{chat_id}/messages", {"$top": min(top, 50)}, limit=top))
+    # No $select: Graph answers 500 for chat messages when one is set.
+    return await _read(response, token, lambda note, broker: chat_read.enrich(note, broker, note.list(f"me/chats/{chat_id}/messages", {"$top": min(top, 50)}, limit=top)), with_broker=True)
+
+
+@app.get("/api/chats/{chat_id}/messages/{message_id}/hostedContents/{hosted_id:path}", tags=["Microsoft 365"], response_class=Response, responses={200: {"content": {"image/png": {}}}})
+async def chat_hosted_content(chat_id: str, message_id: str, hosted_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    _check_id(chat_id, CHAT_ID_PATTERN, "chat_id")
+    _check_id(message_id, MESSAGE_ID_PATTERN, "message_id")
+    _check_id(hosted_id, GRAPH_ID_PATTERN, "hosted_id")
+    carrier = Response()
+    data = await _read(carrier, token, lambda note: note.get(f"{chat_read.message_path(chat_id, message_id)}/hostedContents/{_seg(hosted_id)}/$value", raw="bytes"))
+    headers = _token_headers(carrier)
+    mime = chat_send.image_type((data or b"")[:12])
+    if mime is None:
+        # Only images are proxied; anything else a hosted content could hold is refused.
+        raise HTTPException(status_code=415, detail="The hosted content is not a PNG, JPEG, GIF or WEBP image.", headers=headers)
+    if len(data) > MAX_DOWNLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="The image is larger than 25 MB.", headers=headers)
+    headers["Cache-Control"] = "private, max-age=3600"
+    headers["X-Content-Type-Options"] = "nosniff"
+    return Response(content=data, media_type=mime, headers=headers)
+
+
+@app.get("/api/chats/{chat_id}/messages/{message_id}/files/{attachment_id}", tags=["Microsoft 365"], response_class=StreamingResponse, responses={200: {"content": {"application/octet-stream": {}}}})
+async def chat_file(chat_id: str, message_id: str, attachment_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    _check_id(chat_id, CHAT_ID_PATTERN, "chat_id")
+    _check_id(message_id, MESSAGE_ID_PATTERN, "message_id")
+    _check_id(attachment_id, ATTACHMENT_ID_PATTERN, "attachment_id")
+
+    def resolve(note):
+        message = note.get(chat_read.message_path(chat_id, message_id))
+        ref = next((f for f in chat_html.reference_files(message) if f.get("id") == attachment_id), None)
+        if ref is None:
+            raise HTTPException(status_code=404, detail="File not found in the message.")
+        item = note.get(chat_read.drive_item_path(ref["contentUrl"], "name,size,file,@microsoft.graph.downloadUrl"))
+        if (item.get("size") or 0) > MAX_CHAT_FILE_BYTES:
+            raise HTTPException(status_code=413, detail="The file is larger than 100 MB.")
+        url = item.get("@microsoft.graph.downloadUrl")
+        if not url:
+            raise HTTPException(status_code=404, detail="The file has no download link.")
+        return item, url
+
+    carrier = Response()
+    item, url = await _read(carrier, token, resolve)
+    headers = _token_headers(carrier)
+    name = _safe_name(item.get("name"))
+    headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(name, safe='')}"
+    headers["Cache-Control"] = "no-store"
+    headers["X-Content-Type-Options"] = "nosniff"
+    headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
+    # The download URL is pre-authorized and short-lived; the bytes stream through without being held.
+    return StreamingResponse(outnote_client.stream_download(url, MAX_CHAT_FILE_BYTES), media_type=_safe_content_type((item.get("file") or {}).get("mimeType")), headers=headers)
 
 
 @app.post("/api/chats/{chat_id}/messages", tags=["Microsoft 365"])
-async def send_chat_message(chat_id: str, body: SendMessageRequest, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+async def send_chat_message(chat_id: str, request: Request, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    """JSON `{content, contentType, importance, mentions, gif}` (or the legacy `{text}`), or multipart/form-data with the same fields (mentions and gif as JSON strings) plus `images` and `files` parts."""
     _check_id(chat_id, CHAT_ID_PATTERN, "chat_id")
-    return await _read(response, token, lambda note: note.send_chat_message(chat_id, body.text))
+    form = None
+    try:
+        if request.headers.get("content-type", "").lower().startswith("multipart/form-data"):
+            form = await request.form(max_files=chat_send.MAX_IMAGES + chat_send.MAX_FILES, max_fields=20, max_part_size=256 * 1024)
+            fields = {k: form.get(k) for k in ("content", "text", "contentType", "importance") if isinstance(form.get(k), str)}
+            fields["mentions"] = _json_field(form.get("mentions"), "mentions")
+            fields["gif"] = _json_field(form.get("gif"), "gif")
+            images = [_upload(f) for f in form.getlist("images") if isinstance(f, UploadFile)]
+            files = [_upload(f) for f in form.getlist("files") if isinstance(f, UploadFile)]
+        else:
+            try:
+                fields = await request.json()
+            except ValueError:
+                raise HTTPException(status_code=400, detail="The body must be JSON or multipart/form-data.")
+            if not isinstance(fields, dict):
+                raise HTTPException(status_code=400, detail="The body must be a JSON object.")
+            images, files = [], []
+        msg = _outgoing(fields, images, files)
+
+        def send(note, broker):
+            try:
+                created = chat_send.send(note, chat_id, msg)
+            except chat_send.SendError as ex:
+                raise HTTPException(status_code=ex.status, detail=str(ex))
+            return chat_read.enrich(note, broker, [created or {}])[0]
+
+        return await _read(response, token, send, with_broker=True)
+    finally:
+        if form is not None:
+            await form.close()
+
+
+@app.post("/api/chats/{chat_id}/meeting", status_code=201, tags=["Microsoft 365"])
+async def schedule_chat_meeting(chat_id: str, body: MeetingRequest, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    """Creates a Teams meeting in the user's calendar with the chat's members as attendees."""
+    _check_id(chat_id, CHAT_ID_PATTERN, "chat_id")
+    if body.end <= body.start:
+        raise HTTPException(status_code=400, detail="end must be after start.")
+
+    def create(note):
+        members = [] if chat_id == chat_send.SELF_CHAT else note.list(f"chats/{chat_id}/members")
+        me = note.get("me", {"$select": "mail,userPrincipalName"})
+        mine = {(me.get("mail") or "").lower(), (me.get("userPrincipalName") or "").lower()}
+        attendees = [{"emailAddress": {"address": m["email"], "name": m.get("displayName") or m["email"]}, "type": "required"} for m in members if m.get("email") and m["email"].lower() not in mine]
+        event = {
+            "subject": body.subject,
+            "start": {"dateTime": _utc(body.start), "timeZone": "UTC"},
+            "end": {"dateTime": _utc(body.end), "timeZone": "UTC"},
+            "isOnlineMeeting": True,
+            "onlineMeetingProvider": "teamsForBusiness",
+            "attendees": attendees,
+        }
+        if body.description:
+            event["body"] = {"contentType": "text", "content": body.description}
+        created = note.post("me/events", event)
+        return {"id": created.get("id"), "subject": created.get("subject"), "start": created.get("start"), "end": created.get("end"), "webLink": created.get("webLink"), "joinUrl": (created.get("onlineMeeting") or {}).get("joinUrl"), "attendees": [a["emailAddress"] for a in attendees]}
+
+    return await _read(response, token, create)
+
+
+@app.get("/api/gifs/search", tags=["GIFs"])
+async def gif_search(q: str = Query(..., min_length=1, max_length=100), limit: int = Query(24, ge=1, le=50)):
+    return await _gifs(q, limit)
+
+
+@app.get("/api/gifs/trending", tags=["GIFs"])
+async def gif_trending(limit: int = Query(24, ge=1, le=50)):
+    return await _gifs(None, limit)
+
+
+async def _gifs(query: str | None, limit: int):
+    try:
+        return await asyncio.to_thread(gifs.search, query, limit)
+    except gifs.GifSearchUnavailable as ex:
+        raise HTTPException(status_code=503, detail=str(ex))
+    except Exception as ex:
+        raise HTTPException(status_code=502, detail=f"GIF search failed: {type(ex).__name__}")
+
+
+def _utc(value) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).replace(tzinfo=None).isoformat()
+
+
+def _json_field(value, name: str):
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise HTTPException(status_code=400, detail=f"{name} must be a JSON string.")
+    try:
+        return json.loads(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"{name} is not valid JSON.")
+
+
+def _upload(part: UploadFile) -> chat_send.Upload:
+    size = part.size
+    if size is None:
+        part.file.seek(0, 2)
+        size = part.file.tell()
+    part.file.seek(0)
+    return chat_send.Upload(name=part.filename or "file", file=part.file, size=size, content_type=part.content_type)
+
+
+def _outgoing(fields: dict, images: list, files: list) -> chat_send.OutgoingMessage:
+    content = fields.get("content")
+    if content is None:
+        content = fields.get("text")
+    mentions = fields.get("mentions") or []
+    gif = fields.get("gif")
+    if not isinstance(content, (str, type(None))) or not isinstance(mentions, list) or not isinstance(gif, (dict, type(None))):
+        raise HTTPException(status_code=400, detail="Invalid message fields.")
+    content_type, importance = fields.get("contentType") or "text", fields.get("importance") or None
+    if not isinstance(content_type, str) or not isinstance(importance, (str, type(None))):
+        raise HTTPException(status_code=400, detail="Invalid message fields.")
+    msg = chat_send.OutgoingMessage(content=content or "", content_type=content_type, importance=importance, mentions=mentions, gif=gif, images=images, files=files)
+    try:
+        return chat_send.validate(msg)
+    except chat_send.SendError as ex:
+        raise HTTPException(status_code=ex.status, detail=str(ex))
 
 
 @app.post("/api/chats/{chat_id}/read", status_code=204, tags=["Microsoft 365"])
@@ -282,6 +476,29 @@ async def mark_chat_read(chat_id: str, token: str = Header(..., alias=config.REF
     carrier = Response()
     await _read(carrier, token, lambda note: note.mark_chat_read(chat_id))
     return Response(status_code=204, headers=_token_headers(carrier))
+
+
+@app.get("/api/chats/{chat_id}/photo", tags=["Microsoft 365"], response_class=Response, responses={200: {"content": {"image/jpeg": {}}}})
+async def chat_photo(chat_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    _check_id(chat_id, CHAT_ID_PATTERN, "chat_id")
+
+    def fetch(note, broker):
+        try:
+            return teams_chat.picture(broker, chat_id)
+        except teams_chat.ChatServiceError as ex:
+            if ex.status in (401, 403):
+                # Teams refused this account (tenant policy, no Teams licence): there is no picture to show.
+                return None
+            raise
+
+    carrier = Response()
+    data = await _read(carrier, token, fetch, with_broker=True)
+    headers = _token_headers(carrier)
+    if not data:
+        raise HTTPException(status_code=404, detail="The chat has no picture.", headers=headers)
+    headers["Cache-Control"] = "no-store"
+    headers["X-Content-Type-Options"] = "nosniff"
+    return Response(content=data, media_type=_image_type(data), headers=headers)
 
 
 @app.get("/api/users/{user_id}/photo", tags=["Microsoft 365"], response_class=Response, responses={200: {"content": {"image/jpeg": {}}}})
@@ -318,10 +535,10 @@ async def _identity(refresh_token: str) -> LinkedIdentity:
         return LinkedIdentity()
 
 
-async def _read(response: Response, refresh_token: str, action: Callable[[object], object]):
+async def _read(response: Response, refresh_token: str, action: Callable[..., object], with_broker: bool = False):
     note, broker = outnote_client.build_client(refresh_token)
     try:
-        data = await asyncio.to_thread(action, note)
+        data = await asyncio.to_thread(action, note, broker) if with_broker else await asyncio.to_thread(action, note)
     except HTTPException as ex:
         # The token may have rotated before the action refused; keep it for the caller.
         if broker.refresh_token and broker.refresh_token != refresh_token:
@@ -403,9 +620,28 @@ def _attachment_meta(item: dict) -> dict:
     return {k: item.get(k) for k in keep}
 
 
-def _folder_tree(flat: list[dict]) -> list[dict]:
+def _folders(note, broker) -> list[dict]:
+    roles = folder_roles.cached(broker)
+    if roles is not None:
+        return _folder_tree(note.mail_folders(include_children=True), roles)
+    # First list this hour: resolve the well-known roles in parallel with the folder walk, so they cost no extra round trip.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(folder_roles.lookup, note)
+        flat = note.mail_folders(include_children=True)
+        try:
+            roles = pending.result()
+        except Exception as ex:
+            # Roles only label folders; the tree is still useful without them.
+            log.info("mail folder role lookup failed: %s", type(ex).__name__)
+            roles = {}
+    folder_roles.remember(broker, roles)
+    return _folder_tree(flat, roles)
+
+
+def _folder_tree(flat: list[dict], roles: dict[str, str] | None = None) -> list[dict]:
     # OutNote walks the subfolders breadth-first into a flat list; rebuild the nesting from parentFolderId.
-    nodes = {f["id"]: {**f, "childFolders": []} for f in flat}
+    roles = roles or {}
+    nodes = {f["id"]: {**f, "wellKnownName": roles.get(f["id"]), "childFolders": []} for f in flat}
     roots = []
     for f in flat:
         parent = nodes.get(f.get("parentFolderId"))

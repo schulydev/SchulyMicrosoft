@@ -12,8 +12,11 @@ The Schuly **Microsoft plugin** is the only caller.
 - Sign-in is the **browser sign-in** (authorization code + PKCE in a WebView, used by the
   plugin) or the **device-code flow** — the student always authenticates on Microsoft's real
   page. This service never sees a password. Do **not** add password/credential endpoints.
-- Uses only the **public** OutNote/Entrance API (`outnote.OutNote`, `entrance.Broker`) plus
-  the documented OAuth calls for the browser and device flows. Don't reach into their private modules.
+- Uses only the **public** OutNote/Entrance API (`outnote.OutNote`, `entrance.Broker`,
+  `entrance.http_client`) plus the documented OAuth calls for the browser and device flows. Don't
+  reach into their private modules. The one non-Graph surface is the Teams chat service for group
+  chat pictures (`teams_chat.py`): a Teams-client token for `api.spaces.skype.com` is traded at
+  `teams.microsoft.com/api/authsvc/v1.0/authz` for a skype token.
 
 ## Code formatting
 
@@ -31,6 +34,13 @@ src/
   browser_auth.py       # browser sign-in (authorize URL + PKCE, code exchange)
   outnote_client.py     # thin OutNote/Entrance wrapper (device start/poll, build_client)
   models.py             # pydantic DTOs
+  account_cache.py      # per-account TTL cache living on the shared broker
+  folder_roles.py       # well-known mail folder names via one $batch
+  teams_chat.py         # group chat pictures over the Teams chat service (skype token, AMS)
+  chat_read.py          # chat messages + media/files/cards for the web
+  chat_html.py          # composer HTML allowlist sanitizer, body media/card extraction
+  chat_send.py          # rich sends: hosted images, GIFs, mentions, OneDrive file shares
+  gifs.py               # Giphy search (needs GIPHY_API_KEY; 503 without)
 tests/                  # pytest, fully mocked (no network)
 ```
 
