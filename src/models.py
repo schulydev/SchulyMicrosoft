@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -40,8 +41,11 @@ class DevicePollResponse(BaseModel):
     message: str | None = None
 
 
-class SendMessageRequest(BaseModel):
-    text: str = Field(..., min_length=1, max_length=4000, description="Plain text; sent as the signed-in user.")
+class MeetingRequest(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=255)
+    start: datetime = Field(..., description="ISO 8601 with an offset, e.g. 2026-11-02T14:00:00+01:00.")
+    end: datetime
+    description: str | None = Field(None, max_length=4000)
 
 
 class MailAttachmentIn(BaseModel):

@@ -20,6 +20,7 @@ from entrance import Broker
 from outnote import OutNote
 
 from src import config
+from src.account_cache import AccountCache
 
 log = logging.getLogger("schuly.microsoft")
 
@@ -60,6 +61,8 @@ class _SharedBroker(Broker):
         super().__init__(refresh_token)
         self._lock = threading.Lock()
         self._on_rotate = on_rotate
+        # Per-account values that rarely change (folder roles, chat pictures); shared with the broker's lifetime.
+        self.cache = AccountCache()
 
     def __call__(self, client_id, scope="https://graph.microsoft.com/.default"):
         with self._lock:
@@ -160,6 +163,18 @@ async def _post(url: str, data: dict, client: httpx.AsyncClient | None) -> dict:
         return response.json()
     finally:
         log.debug("POST %s took %.0f ms", url, (time.perf_counter() - started) * 1000)
+
+
+def stream_download(url: str, limit: int):
+    """Yields a pre-authorized download URL's bytes in chunks (no bearer token is sent), stopping past `limit` bytes."""
+    with entrance.http_client().stream("GET", url, timeout=httpx.Timeout(60.0, connect=5.0), follow_redirects=True) as r:
+        r.raise_for_status()
+        sent = 0
+        for chunk in r.iter_bytes(64 * 1024):
+            sent += len(chunk)
+            if sent > limit:
+                return
+            yield chunk
 
 
 # Read helpers, kept tiny so routers stay declarative. Each returns plain JSON-able data.

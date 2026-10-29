@@ -100,9 +100,9 @@ class ChatNote:
         self.calls.append(("list", path, params, limit))
         return [{"id": "m1", "chat": path.split("/")[2], "top": limit, "select": params.get("$select")}]
 
-    def send_chat_message(self, chat_id, text):
-        self.calls.append(("send", chat_id, text))
-        return {"id": "new", "body": {"content": text}}
+    def post(self, path, body=None):
+        self.calls.append(("post", path, body))
+        return {"id": "new", "body": body["body"]}
 
     def mark_chat_read(self, chat_id):
         self.calls.append(("read", chat_id))
@@ -144,7 +144,7 @@ def expired(monkeypatch):
 def test_chat_messages_returns_graph_messages_and_rotated_token(chat_note):
     r = TestClient(app).get("/api/chats/19:abc@thread.v2/messages", headers=HEADERS, params={"top": 10})
     assert r.status_code == 200
-    assert r.json() == [{"id": "m1", "chat": "19:abc@thread.v2", "top": 10, "select": None}]
+    assert r.json() == [{"id": "m1", "chat": "19:abc@thread.v2", "top": 10, "select": None, "media": [], "files": [], "cards": [], "importance": "normal"}]
     assert r.headers[config.REFRESH_TOKEN_HEADER] == "rotated-frt"
 
 
@@ -165,14 +165,15 @@ def test_send_chat_message_returns_created_message_and_rotated_token(chat_note):
     r = TestClient(app).post("/api/chats/c1/messages", headers=HEADERS, json={"text": "hello"})
     assert r.status_code == 200
     assert r.json()["id"] == "new"
-    assert chat_note.calls == [("send", "c1", "hello")]
+    assert chat_note.calls == [("post", "chats/c1/messages", {"body": {"contentType": "text", "content": "hello"}})]
     assert r.headers[config.REFRESH_TOKEN_HEADER] == "rotated-frt"
 
 
 def test_send_chat_message_rejects_empty_and_oversized_text(chat_note):
     client = TestClient(app)
-    assert client.post("/api/chats/c1/messages", headers=HEADERS, json={"text": ""}).status_code == 422
-    assert client.post("/api/chats/c1/messages", headers=HEADERS, json={"text": "x" * 4001}).status_code == 422
+    assert client.post("/api/chats/c1/messages", headers=HEADERS, json={"text": ""}).status_code == 400
+    assert client.post("/api/chats/c1/messages", headers=HEADERS, json={"text": "x" * 28001}).status_code == 413
+    assert chat_note.calls == []
 
 
 def test_send_chat_message_expired_is_401(expired):
