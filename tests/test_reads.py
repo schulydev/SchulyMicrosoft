@@ -148,7 +148,7 @@ def test_chat_messages_returns_graph_messages_and_rotated_token(chat_note):
 
 
 def test_chat_messages_top_is_capped(chat_note):
-    assert TestClient(app).get("/api/chats/c1/messages", headers=HEADERS, params={"top": 51}).status_code == 422
+    assert TestClient(app).get("/api/chats/c1/messages", headers=HEADERS, params={"top": 301}).status_code == 422
 
 
 def test_chat_messages_expired_is_401(expired):
