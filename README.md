@@ -39,6 +39,10 @@ GET  /api/calendar?top=&start=&end=  "
 GET  /api/files?path=&top=           "
 GET  /api/chats?top=                 "
 GET  /api/notebooks                  "
+GET  /api/chats/{id}/messages?top=   "  (newest first, top <= 50)
+POST /api/chats/{id}/messages        { text } (1-4000 chars) → created message
+POST /api/chats/{id}/read            → 204
+GET  /api/users/{id}/photo?size=     "  (48|64|96|120|240) → image bytes, 404 if none
 ```
 
 ## Run
