@@ -296,3 +296,10 @@ def test_graph_404_maps_to_404_and_other_errors_to_502(monkeypatch, client):
     monkeypatch.setattr(outnote_client, "build_client", lambda frt: (Note(), Broker()))
     assert client.get(f"/api/mail/{MID}", headers=H).status_code == 404
     assert client.get("/api/mail/folders", headers=H).status_code == 502
+
+
+def test_mail_list_skip_pages_with_skip_param_and_rejects_search(calls, client):
+    r = client.get("/api/mail", headers=H, params={"folder": "inbox", "top": 25, "skip": 50, "unread": "true"})
+    assert r.status_code == 200
+    assert ("list", ("me/mailFolders/inbox/messages",), {}) in calls or any(c[0] == "list" and c[1][0] == "me/mailFolders/inbox/messages" for c in calls)
+    assert client.get("/api/mail", headers=H, params={"skip": 5, "search": "x"}).status_code == 400

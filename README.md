@@ -34,7 +34,7 @@ POST /api/auth/browser/complete      { code, code_verifier } → complete (+ ref
 POST /api/auth/device/start          → { user_code, verification_uri, device_code, ... }
 POST /api/auth/device/poll           { device_code } → pending | complete (+ refresh_token, account)
 GET  /api/me                         header X-MS-Refresh-Token
-GET  /api/mail?folder=&top=&unread=&search=  "  (folder: well-known name or folder id)
+GET  /api/mail?folder=&top=&skip=&unread=&search=  "  (skip pages, not with search; folder: well-known name or folder id)
 GET  /api/mail/folders               "  (nested: childFolders[])
 GET  /api/mail/{id}                  "  (full message incl. body)
 GET  /api/mail/{id}/attachments      "  (metadata only)

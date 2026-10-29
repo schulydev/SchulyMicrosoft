@@ -116,9 +116,17 @@ async def me(response: Response, token: str = Header(..., alias=config.REFRESH_T
 
 
 @app.get("/api/mail", tags=["Microsoft 365"])
-async def mail(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), folder: str = Query("inbox"), top: int = Query(25, le=500), unread: bool = Query(False), search: str | None = Query(None)):
+async def mail(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), folder: str = Query("inbox"), top: int = Query(25, ge=1, le=500), skip: int = Query(0, ge=0, le=10000), unread: bool = Query(False), search: str | None = Query(None)):
     _check_id(folder, GRAPH_ID_PATTERN, "folder")
-    return await _read(response, token, lambda note: note.emails(folder=_seg(folder), top=top, unread=unread, search=search, select=MAIL_LIST_FIELDS))
+    if skip and search:
+        raise HTTPException(status_code=400, detail="skip cannot be combined with search.")
+    if not skip:
+        return await _read(response, token, lambda note: note.emails(folder=_seg(folder), top=top, unread=unread, search=search, select=MAIL_LIST_FIELDS))
+    # Paging: newest first, `skip` messages in. Graph does not allow $skip together with $search.
+    params = {"$top": min(top, 100), "$skip": skip, "$select": MAIL_LIST_FIELDS, "$orderby": "receivedDateTime desc"}
+    if unread:
+        params["$filter"] = "isRead eq false"
+    return await _read(response, token, lambda note: note.list(f"me/mailFolders/{_seg(folder)}/messages", params, limit=top))
 
 
 # Fixed paths (folders/send/drafts) are declared before the {message_id} routes so they can never be read as an id.
