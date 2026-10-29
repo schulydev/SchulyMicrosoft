@@ -2,8 +2,10 @@
 file references pulled out of what Graph returns.
 
 Sending: only formatting tags survive, with no attributes except `a[href]` (http, https, mailto),
-`at[id]` for a mention the request declares, and `img[src]` pointing at one of the request's own
-inline images (`../hostedContents/{n}/$value`). Everything else is dropped (the text inside an
+`at[id]` for a mention the request declares, `img[src]` pointing at one of the request's own
+inline images (`../hostedContents/{n}/$value`), and `emoji[id]` for an id in the Teams emoji catalogue, rewritten to exactly
+what Teams sends (`<emoji id="..." alt="..." title="..."></emoji>`, alt and title taken from the catalogue, never from the
+request). Everything else is dropped (the text inside an
 unknown tag is kept and escaped; script/style/template contents are dropped whole).
 """
 
@@ -17,11 +19,12 @@ ALLOWED = {"b", "strong", "i", "em", "u", "s", "strike", "br", "p", "div", "span
 VOID = {"br"}
 DROP_CONTENT = {"script", "style", "template", "noscript", "iframe", "object", "embed", "svg", "math", "head", "title", "textarea", "select"}
 LINK_SCHEMES = ("http", "https", "mailto")
+MAX_EMOJIS = 100
 HOSTED_SRC = re.compile(r"\.\./hostedContents/(\d{1,2})/\$value")
 
 
 class _Sanitizer(HTMLParser):
-    def __init__(self, mention_ids: set[int], image_ids: set[int]):
+    def __init__(self, mention_ids: set[int], image_ids: set[int], emoji_lookup=None):
         super().__init__(convert_charrefs=True)
         self.out: list[str] = []
         self.open: list[str] = []
@@ -30,6 +33,8 @@ class _Sanitizer(HTMLParser):
         self.image_ids = image_ids
         self.used_mentions: set[int] = set()
         self.used_images: set[int] = set()
+        self.emoji_lookup = emoji_lookup
+        self.emoji_count = 0
 
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
@@ -49,6 +54,13 @@ class _Sanitizer(HTMLParser):
                 self.out.append(f'<at id="{mid}">')
                 self.used_mentions.add(mid)
                 self.open.append(tag)
+        elif tag == "emoji":
+            ref = attrs.get("id")
+            found = self.emoji_lookup(ref) if self.emoji_lookup and isinstance(ref, str) and self.emoji_count < MAX_EMOJIS else None
+            if found:
+                alt, title = found
+                self.out.append(f'<emoji id="{ref}" alt="{html.escape(alt, quote=True)}" title="{html.escape(title, quote=True)}"></emoji>')
+                self.emoji_count += 1
         elif tag == "img":
             m = HOSTED_SRC.fullmatch(attrs.get("src") or "")
             if m and int(m.group(1)) in self.image_ids:
@@ -102,9 +114,9 @@ def _safe_href(value) -> str | None:
     return value
 
 
-def sanitize(content: str, mention_ids: set[int] = frozenset(), image_ids: set[int] = frozenset()) -> tuple[str, set[int], set[int]]:
-    """(clean HTML, mention ids it references, inline image ids it references)."""
-    parser = _Sanitizer(set(mention_ids), set(image_ids))
+def sanitize(content: str, mention_ids: set[int] = frozenset(), image_ids: set[int] = frozenset(), emoji_lookup=None) -> tuple[str, set[int], set[int]]:
+    """(clean HTML, mention ids it references, inline image ids it references). `emoji_lookup(id)` returns (alt, title) for a catalogue emoji id, else None."""
+    parser = _Sanitizer(set(mention_ids), set(image_ids), emoji_lookup)
     parser.feed(content)
     return parser.result(), parser.used_mentions, parser.used_images
 

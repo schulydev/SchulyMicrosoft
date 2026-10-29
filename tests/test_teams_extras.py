@@ -222,7 +222,7 @@ def test_messages_carry_media_files_and_cards(env):
         {"kind": "hosted", "url": None, "hostedContentId": "aWQ9eA==", "alt": "Bild", "width": 394, "height": None},
         {"kind": "gif", "url": GIF_URL, "hostedContentId": None, "alt": "Cat GIF", "width": None, "height": None},
     ]
-    assert m["files"] == [{"id": "a1", "name": "clip.webm", "contentUrl": "https://x-my.sharepoint.com/clip.webm", "contentType": "video/webm", "size": 1234}]
+    assert m["files"] == [{"id": "a1", "name": "clip.webm", "contentUrl": "https://x-my.sharepoint.com/clip.webm", "contentType": "video/webm", "size": 1234, "kind": "video", "hasThumbnail": True, "webUrl": "https://x-my.sharepoint.com/clip.webm"}]
     assert m["cards"][0]["content"] == sticker
     assert m["cards"][0]["sticker"] == {"url": "https://stickers.newfuture.cc/stickers/a/cat.gif", "alt": "cat"}
     assert m["importance"] == "normal"

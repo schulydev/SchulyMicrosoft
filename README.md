@@ -56,6 +56,10 @@ GET  /api/chats/{id}/messages?top=   "  (newest first, top <= 50)
 POST /api/chats/{id}/messages        { text } (1-4000 chars) → created message
 POST /api/chats/{id}/read            → 204
 GET  /api/users/{id}/photo?size=     "  (48|64|96|120|240) → image bytes, 404 if none
+GET  /api/chats/{id}/messages/{mid}/files/{fid}/thumbnail?size=  small|medium|large → JPEG/PNG/WEBP, 404 if none
+GET  /api/files/{itemId}/thumbnail?size=                          "  (OneDrive item)
+GET  /api/emojis/catalogue?locale=  Teams emoji catalogue (no token, cached 24 h)
+GET  /api/emojis/custom/{documentId}?animated=  tenant custom emoji image (message emojis[].documentId)
 ```
 
 ## Run

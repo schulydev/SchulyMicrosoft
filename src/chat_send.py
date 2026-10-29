@@ -15,7 +15,7 @@ from urllib.parse import quote
 
 from entrance import http_client
 
-from src import chat_html
+from src import chat_html, emojis
 
 MAX_CONTENT_CHARS = 28000  # Graph's chat message body limit is about 28 KB
 MAX_IMAGES_BYTES = 3 * 1024 * 1024  # about 4 MB once base64-encoded, Graph's request limit
@@ -129,7 +129,10 @@ def payload(msg: OutgoingMessage, attachments: list[dict] | None = None) -> dict
     else:
         image_ids = set(range(1, len(msg.images) + 1))
         if msg.content_type == "html":
-            content, used_mentions, used_images = chat_html.sanitize(msg.content, {m["id"] for m in msg.mentions}, image_ids)
+            try:
+                content, used_mentions, used_images = chat_html.sanitize(msg.content, {m["id"] for m in msg.mentions}, image_ids, emojis.for_send)
+            except emojis.EmojiError as ex:
+                raise SendError(503, f"Emoji can't be sent right now: {ex}") from None
         else:
             content, used_mentions, used_images = chat_html.text_to_html(msg.content), set(), set()
         # Graph refuses a mention without its <at> tag, so mentions the body doesn't reference are dropped.
