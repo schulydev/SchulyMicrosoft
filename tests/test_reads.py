@@ -144,7 +144,7 @@ def expired(monkeypatch):
 def test_chat_messages_returns_graph_messages_and_rotated_token(chat_note):
     r = TestClient(app).get("/api/chats/19:abc@thread.v2/messages", headers=HEADERS, params={"top": 10})
     assert r.status_code == 200
-    assert r.json() == [{"id": "m1", "chat": "19:abc@thread.v2", "top": 10, "select": app_module.CHAT_MESSAGE_FIELDS}]
+    assert r.json() == [{"id": "m1", "chat": "19:abc@thread.v2", "top": 10, "select": None}]
     assert r.headers[config.REFRESH_TOKEN_HEADER] == "rotated-frt"
 
 

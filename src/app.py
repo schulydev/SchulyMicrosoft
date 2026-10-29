@@ -46,7 +46,7 @@ MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 # Field lists keep list responses small: no mail body in lists (the single-message route returns it), and no unused chat metadata.
 MAIL_LIST_FIELDS = "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments,importance,conversationId"
 CHAT_FIELDS = "id,topic,chatType,createdDateTime,lastUpdatedDateTime,webUrl,viewpoint"
-CHAT_MESSAGE_FIELDS = "id,chatId,messageType,createdDateTime,lastModifiedDateTime,deletedDateTime,from,body,attachments,mentions,reactions,importance,replyToId,eventDetail"
+# Graph answers 500 when $select is set on chat messages, so they are fetched whole.
 
 
 @app.get("/", include_in_schema=False)
@@ -267,7 +267,7 @@ async def notebooks(response: Response, token: str = Header(..., alias=config.RE
 @app.get("/api/chats/{chat_id}/messages", tags=["Microsoft 365"])
 async def chat_messages(chat_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), top: int = Query(30, ge=1, le=300)):
     _check_id(chat_id, CHAT_ID_PATTERN, "chat_id")
-    return await _read(response, token, lambda note: note.list(f"me/chats/{chat_id}/messages", {"$top": min(top, 50), "$select": CHAT_MESSAGE_FIELDS}, limit=top))
+    return await _read(response, token, lambda note: note.list(f"me/chats/{chat_id}/messages", {"$top": min(top, 50)}, limit=top))
 
 
 @app.post("/api/chats/{chat_id}/messages", tags=["Microsoft 365"])
