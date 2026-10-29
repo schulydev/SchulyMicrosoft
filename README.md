@@ -14,7 +14,8 @@ clients through OutNote's FOCI token broker.
 ## How sign-in works
 
 The student signs in **once**, always on Microsoft's real sign-in page (so push,
-number-matching and passkeys all work). No password ever reaches this service. Two flows:
+number-matching and passkeys all work). The one exception is the password sign-in route below (see
+"Password sign-in"); every other route never sees a password. Two flows:
 
 - **Browser sign-in** (what the Schuly Microsoft plugin uses): an OAuth 2.0
   authorization-code + PKCE flow. `browser/start` returns the authorize URL and a
@@ -23,6 +24,17 @@ number-matching and passkeys all work). No password ever reaches this service. T
   `browser/complete`. Works on tenants that block the device-code flow.
 - **Device-code flow**: the service returns a short code and a URL, the student opens the
   URL and enters the code, and the caller polls until it completes.
+
+### Password sign-in
+
+For the Schuly web app, which cannot host Microsoft's page: `password/start` receives the Microsoft
+password **once**, passes it to Entrance on a worker thread and drops it. It is held only in memory for
+that call and is never stored, cached, logged or returned. If Microsoft asks for MFA the sign-in pauses
+and `start` returns the methods the account offers (`push` = Authenticator number matching, `otp` = a
+code from an authenticator app); `method` picks one (and may switch mid-way), `otp` submits the code.
+No MFA means `start` completes right away. Federated/ADFS accounts, unsupported methods and
+Conditional Access blocks return `error` with code `unsupported` / `blocked`. Sign-in jobs live in
+memory for at most 10 minutes, so **run exactly one process** (`asgi.py` pins `workers=1`).
 
 Either way the result is a FOCI family refresh token that the **caller stores** and sends
 back on each read; the broker rotates it and the service hands the new one back in the
@@ -33,6 +45,11 @@ POST /api/auth/browser/start         → { authorize_url, redirect_uri, code_ver
 POST /api/auth/browser/complete      { code, code_verifier } → complete (+ refresh_token, account) | error
 POST /api/auth/device/start          → { user_code, verification_uri, device_code, ... }
 POST /api/auth/device/poll           { device_code } → pending | complete (+ refresh_token, account)
+POST /api/auth/password/start        { username, password } → complete | mfa_required { methods } | error { code }
+POST /api/auth/password/{id}/method  { method: push|otp } → push_pending { number, expires_in } | otp_required
+POST /api/auth/password/{id}/otp     { code } → complete | otp_invalid { attempts_left } | error
+GET  /api/auth/password/{id}         → current status (push_pending | complete | denied | timed_out | error | ...)
+DELETE /api/auth/password/{id}       → 204 (cancel)
 GET  /api/me                         header X-MS-Refresh-Token
 GET  /api/mail?folder=&top=&skip=&unread=&search=  "  (skip pages, not with search; folder: well-known name or folder id)
 GET  /api/mail/folders               "  (nested: childFolders[])

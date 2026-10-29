@@ -1,7 +1,8 @@
 """SchulyMicrosoft: stateless Microsoft 365 access for Schuly, over OutNote / Entrance.
 
-The user signs in once with the device-code flow on Microsoft's real page (no password
-reaches this service); the caller stores the returned FOCI refresh token and sends it back
+The user signs in once with the device-code or browser flow on Microsoft's real page (no password
+reaches this service; the one exception is the web password sign-in route, which uses the password
+once in memory and never stores or logs it); the caller stores the returned FOCI refresh token and sends it back
 on each read. Reads return the rotated refresh token in the X-MS-Refresh-Token header.
 """
 
@@ -18,24 +19,38 @@ from urllib.parse import quote
 from collections.abc import Callable
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.datastructures import UploadFile
 
+import entrance
 from outnote import GraphError
 
-from src import browser_auth, chat_html, chat_read, chat_send, config, emojis, file_thumbs, folder_roles, gifs, outnote_client, people_photos, teams_chat
-from src.models import BrowserCompleteRequest, BrowserStartResponse, DevicePollRequest, DevicePollResponse, DeviceStartResponse, LinkedIdentity, MailFlagRequest, MailForwardRequest, MailMessageIn, MailMoveRequest, MailReadRequest, MailReplyRequest, MeetingRequest
+from src import password_signin, browser_auth, chat_html, chat_read, chat_send, config, emojis, file_thumbs, folder_roles, gifs, outnote_client, people_photos, teams_chat
+from src.models import PasswordMethodRequest, PasswordOtpRequest, PasswordSignInResponse, PasswordStartRequest, BrowserCompleteRequest, BrowserStartResponse, DevicePollRequest, DevicePollResponse, DeviceStartResponse, LinkedIdentity, MailFlagRequest, MailForwardRequest, MailMessageIn, MailMoveRequest, MailReadRequest, MailReplyRequest, MeetingRequest
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # Pre-open the TLS connections to Microsoft in the background: the first call after a cold start otherwise pays DNS, TCP and TLS (and any dead-address timeout) itself.
     warm = asyncio.create_task(outnote_client.warm_up())
+    sweeper = asyncio.create_task(_sweep_sign_ins())
     yield
     warm.cancel()
+    sweeper.cancel()
+    password_signin.store.clear()
     await outnote_client.close_shared_client()
 
 
 log = logging.getLogger("schuly.microsoft")
+
+
+async def _sweep_sign_ins():
+    """Drop expired password sign-in jobs (and stale rate-limit windows) every few seconds."""
+    while True:
+        await asyncio.sleep(15)
+        password_signin.store.sweep()
+
 
 app = FastAPI(title="SchulyMicrosoft", description="Microsoft 365 access for Schuly via OutNote.", lifespan=lifespan)
 
@@ -63,6 +78,15 @@ MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
 MAIL_LIST_FIELDS = "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments,importance,conversationId"
 CHAT_FIELDS = "id,topic,chatType,createdDateTime,lastUpdatedDateTime,webUrl,viewpoint"
 # Graph answers 500 when $select is set on chat messages, so they are fetched whole.
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error(request: Request, exc: RequestValidationError):
+    # FastAPI's default 422 echoes the rejected input; for the password routes that would be the password.
+    if request.url.path.startswith("/api/auth/password"):
+        details = [{"loc": list(e.get("loc", ())), "msg": e.get("msg"), "type": e.get("type")} for e in exc.errors()]
+        return JSONResponse(status_code=422, content={"status": "error", "code": "invalid_request", "message": "The request is invalid.", "detail": details})
+    return await request_validation_exception_handler(request, exc)
 
 
 @app.get("/", include_in_schema=False)
@@ -124,6 +148,108 @@ async def browser_complete(body: BrowserCompleteRequest):
     refresh_token = result["refresh_token"]
     account = await _identity(refresh_token)
     return DevicePollResponse(status="complete", refresh_token=refresh_token, account=account)
+
+
+SIGN_IN_WAIT = 60  # seconds /start waits for the sign-in to finish or reach the method choice
+METHOD_WAIT = 30  # seconds /method waits for the push number / the code prompt
+OTP_WAIT = 45  # seconds /otp waits for Microsoft's verdict
+_sign_in_waiters = ThreadPoolExecutor(max_workers=password_signin.MAX_JOBS + 20, thread_name_prefix="pwd-wait")
+
+
+def _sign_in_error(status_code: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse(status_code=status_code, content={"status": "error", "code": code, "message": message})
+
+
+async def _wait_settled(job: password_signin.SignInJob, after_version: int, timeout: float) -> None:
+    await asyncio.get_running_loop().run_in_executor(_sign_in_waiters, job.wait_settled, after_version, timeout)
+
+
+async def _sign_in_response(job: password_signin.SignInJob) -> PasswordSignInResponse:
+    """The job's current place as a response. Reads progress only; the password is not on the job."""
+    snap = job.snapshot()
+    state = snap["state"]
+    base = {"sign_in_id": job.id}
+    if state == password_signin.COMPLETE:
+        if job.account is None:
+            job.account = await _identity(snap["refresh_token"])
+        return PasswordSignInResponse(**base, status="complete", refresh_token=snap["refresh_token"], account=job.account)
+    if state == password_signin.ERROR:
+        return PasswordSignInResponse(**base, status="error", code=snap["code"], message=snap["message"])
+    if state == password_signin.PUSH_PENDING:
+        return PasswordSignInResponse(**base, status="push_pending", number=snap["number"], expires_in=snap["expires_in"], methods=snap["methods"])
+    if state == password_signin.OTP_REQUIRED:
+        status = "otp_invalid" if snap.get("otp_invalid") else "otp_required"
+        return PasswordSignInResponse(**base, status=status, attempts_left=snap["attempts_left"], methods=snap["methods"])
+    if state in (password_signin.MFA_REQUIRED, password_signin.DENIED, password_signin.TIMED_OUT):
+        if snap["notice"] == "otp_exhausted":
+            return PasswordSignInResponse(**base, status="otp_invalid", attempts_left=0, methods=snap["methods"], message="Too many wrong codes; choose a method again.")
+        return PasswordSignInResponse(**base, status=state, methods=snap["methods"])
+    return PasswordSignInResponse(**base, status="working")
+
+
+@app.post("/api/auth/password/start", response_model=PasswordSignInResponse, response_model_exclude_none=True, tags=["Auth"])
+async def password_start(body: PasswordStartRequest, request: Request):
+    """Sign in with the Microsoft password. The password is used once, held only in memory for this
+    sign-in and never stored, cached, logged or returned. Completes straight away when Microsoft asks
+    for no MFA; otherwise returns mfa_required with the methods Microsoft offers."""
+    secret = entrance.Secret(body.password.get_secret_value())
+    username = body.username
+    body.password = None  # the request model no longer references the password
+    try:
+        job = password_signin.store.start(request.client.host if request.client else "unknown", username, secret)
+    except password_signin.RateLimited as ex:
+        return _sign_in_error(429, "rate_limited", str(ex))
+    finally:
+        del secret
+    await _wait_settled(job, -1, SIGN_IN_WAIT)
+    return await _sign_in_response(job)
+
+
+@app.post("/api/auth/password/{sign_in_id}/method", response_model=PasswordSignInResponse, response_model_exclude_none=True, tags=["Auth"])
+async def password_method(sign_in_id: str, body: PasswordMethodRequest):
+    """Choose (or switch to) push or otp. push -> push_pending with the number to tap; otp -> otp_required."""
+    job = password_signin.store.get(sign_in_id)
+    if job is None:
+        return _sign_in_error(404, "not_found", "Unknown or expired sign-in.")
+    version = job.snapshot()["version"]
+    outcome = job.request_method(body.method)
+    if outcome == "unavailable":
+        return _sign_in_error(409, "method_unavailable", "Microsoft doesn't offer that method for this account.")
+    if outcome == "invalid_state":
+        return _sign_in_error(409, "invalid_state", "The sign-in isn't waiting for a method.")
+    if outcome == "ok":
+        await _wait_settled(job, version, METHOD_WAIT)
+    return await _sign_in_response(job)
+
+
+@app.post("/api/auth/password/{sign_in_id}/otp", response_model=PasswordSignInResponse, response_model_exclude_none=True, tags=["Auth"])
+async def password_otp(sign_in_id: str, body: PasswordOtpRequest):
+    """Submit the authenticator code. complete, or otp_invalid with attempts_left (3 tries per method choice)."""
+    job = password_signin.store.get(sign_in_id)
+    if job is None:
+        return _sign_in_error(404, "not_found", "Unknown or expired sign-in.")
+    code = re.sub(r"[\s-]", "", body.code)
+    if not code.isdigit() or not 6 <= len(code) <= 8:
+        return _sign_in_error(422, "invalid_request", "The code must be 6 digits.")
+    version = job.snapshot()["version"]
+    if not job.submit_code(code):
+        return _sign_in_error(409, "invalid_state", "The sign-in isn't waiting for a code.")
+    await _wait_settled(job, version, OTP_WAIT)
+    return await _sign_in_response(job)
+
+
+@app.get("/api/auth/password/{sign_in_id}", response_model=PasswordSignInResponse, response_model_exclude_none=True, tags=["Auth"])
+async def password_status(sign_in_id: str):
+    job = password_signin.store.get(sign_in_id)
+    if job is None:
+        return _sign_in_error(404, "not_found", "Unknown or expired sign-in.")
+    return await _sign_in_response(job)
+
+
+@app.delete("/api/auth/password/{sign_in_id}", status_code=204, tags=["Auth"])
+async def password_cancel(sign_in_id: str):
+    password_signin.store.remove(sign_in_id)
+    return Response(status_code=204)
 
 
 @app.get("/api/me", tags=["Microsoft 365"])

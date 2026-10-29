@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 
 class DeviceStartResponse(BaseModel):
@@ -38,6 +38,32 @@ class DevicePollResponse(BaseModel):
     status: str = Field(..., description="pending | complete | error")
     refresh_token: str | None = None
     account: LinkedIdentity | None = None
+    message: str | None = None
+
+
+class PasswordStartRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=320)
+    password: SecretStr = Field(..., min_length=1, max_length=256, description="Used once for this sign-in, held only in memory, never stored, logged or returned.")
+
+
+class PasswordMethodRequest(BaseModel):
+    method: Literal["push", "otp"]
+
+
+class PasswordOtpRequest(BaseModel):
+    code: str = Field(..., min_length=6, max_length=12, description="The authenticator app code (digits; spaces are ignored).")
+
+
+class PasswordSignInResponse(BaseModel):
+    sign_in_id: str | None = None
+    status: str = Field(..., description="complete | mfa_required | push_pending | otp_required | otp_invalid | denied | timed_out | working | error")
+    methods: list[str] | None = Field(None, description="Only the methods Microsoft offers for the account: push, otp.")
+    number: str | None = Field(None, description="push_pending: the number to tap in Microsoft Authenticator.")
+    expires_in: int | None = Field(None, description="push_pending: seconds left to approve.")
+    attempts_left: int | None = None
+    refresh_token: str | None = None
+    account: LinkedIdentity | None = None
+    code: str | None = Field(None, description="error: invalid_credentials | unsupported | blocked | rate_limited | failed")
     message: str | None = None
 
 

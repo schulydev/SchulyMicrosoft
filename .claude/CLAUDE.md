@@ -6,12 +6,20 @@ The Schuly **Microsoft plugin** is the only caller.
 
 ## What it is / isn't
 
-- **Stateless.** No database, no stored tokens. The caller owns the FOCI refresh token and
+- **Stateless** apart from the short-lived in-memory password sign-in jobs. No database, no stored tokens. The caller owns the FOCI refresh token and
   sends it back in the `X-MS-Refresh-Token` header; reads return the rotated token in the
   same response header.
 - Sign-in is the **browser sign-in** (authorization code + PKCE in a WebView, used by the
-  plugin) or the **device-code flow** — the student always authenticates on Microsoft's real
-  page. This service never sees a password. Do **not** add password/credential endpoints.
+  plugin) or the **device-code flow** — the student authenticates on Microsoft's real page — plus
+  one exception for the web app: `POST /api/auth/password/start` receives the Microsoft password
+  once for the push/TOTP sign-in, holds it only in memory for that call, and never stores, caches,
+  logs or returns it. Every other route still never sees a password. Do **not** add any other
+  password/credential endpoints.
+- Password sign-in jobs (`src/password_signin.py`) are **in memory only** (TTL <= 10 min, sweeper,
+  max concurrent jobs, per-client and per-account rate limits). They hold progress and the result,
+  never the password, so the service **must run as ONE process** (`asgi.py` pins `workers=1`; do not
+  add uvicorn/gunicorn workers or replicas). Keep the password out of logs, job objects, errors
+  and responses (the 422 handler for `/api/auth/password*` strips the echoed input on purpose).
 - Uses only the **public** OutNote/Entrance API (`outnote.OutNote`, `entrance.Broker`,
   `entrance.http_client`) plus the documented OAuth calls for the browser and device flows. Don't
   reach into their private modules. The one non-Graph surface is the Teams chat service for group
@@ -32,6 +40,7 @@ src/
   app.py                # FastAPI app + routes
   config.py             # client ids, scopes, endpoints
   browser_auth.py       # browser sign-in (authorize URL + PKCE, code exchange)
+  password_signin.py    # password sign-in jobs (worker thread per job, MfaPrompt bridge, rate limits)
   outnote_client.py     # thin OutNote/Entrance wrapper (device start/poll, build_client)
   models.py             # pydantic DTOs
   account_cache.py      # per-account TTL cache living on the shared broker
