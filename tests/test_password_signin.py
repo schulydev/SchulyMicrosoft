@@ -29,8 +29,14 @@ class FakeBroker:
         self.refresh_token = refresh_token
 
 
+KEY = "test-service-key"
+UID = "schuly-user-1"
+HEADERS = {"X-Schuly-Service-Key": KEY, "X-Schuly-User-Id": UID}
+
+
 @pytest.fixture(autouse=True)
 def clean(monkeypatch):
+    monkeypatch.setenv("SCHULY_SERVICE_KEY", KEY)
     password_signin.store.clear()
     monkeypatch.setattr(outnote_client, "build_client", lambda frt: (FakeNote(), FakeBroker(frt)))
     yield
@@ -39,7 +45,7 @@ def clean(monkeypatch):
 
 @pytest.fixture
 def api():
-    return TestClient(app)
+    return TestClient(app, headers=HEADERS)
 
 
 def scripted(monkeypatch, script):
@@ -206,7 +212,7 @@ def test_otp_attempts_exhausted_returns_to_method_choice(api, monkeypatch):
     state = api.get(f"/api/auth/password/{sid}").json()
     assert state["status"] == "otp_invalid" and state["methods"] == BOTH
     again = api.post(f"/api/auth/password/{sid}/method", json={"method": "otp"}).json()
-    assert again["status"] == "otp_required" and again["attempts_left"] == 3
+    assert again["status"] == "otp_required" and again["attempts_left"] == 2  # job budget: 5 - 3
 
 
 def test_switch_push_to_otp_and_back(api, monkeypatch):
@@ -279,7 +285,7 @@ def test_expired_job_is_gone(api, monkeypatch):
     approve = threading.Event()
     scripted(monkeypatch, lambda p: drive(p, BOTH, push=push_wait(approve)))
     sid = start(api).json()["sign_in_id"]
-    job = password_signin.store.get(sid)
+    job = password_signin.store.get(sid, UID)
     job.expires = time.monotonic() - 1
     assert api.get(f"/api/auth/password/{sid}").status_code == 404
     assert len(password_signin.store) == 0
@@ -289,7 +295,7 @@ def test_sweeper_drops_expired_and_stale_finished_jobs(api, monkeypatch):
     scripted(monkeypatch, lambda p: FakeBroker())
     sid = start(api).json()["sign_in_id"]
     assert len(password_signin.store) == 1
-    password_signin.store.get(sid).done_at = time.monotonic() - password_signin.DONE_TTL - 1
+    password_signin.store.get(sid, UID).done_at = time.monotonic() - password_signin.DONE_TTL - 1
     password_signin.store.sweep()
     assert len(password_signin.store) == 0
 
@@ -365,13 +371,36 @@ def test_per_client_rate_limit(api, monkeypatch):
     assert r.status_code == 429 and r.json()["code"] == "rate_limited" and r.json()["status"] == "error"
 
 
-def test_per_account_rate_limit(api, monkeypatch):
+def test_only_failed_attempts_count_against_the_account_limit(api, monkeypatch):
     monkeypatch.setattr(password_signin, "ACCOUNT_LIMIT", 2)
     scripted(monkeypatch, lambda p: FakeBroker())
-    assert start(api).status_code == 200
-    assert start(api).status_code == 200
-    assert start(api).status_code == 429
+    for _ in range(4):  # successes never count
+        assert start(api).json()["status"] == "complete"
+
+    def wrong(prompt):
+        raise entrance.InvalidCredentials("no")
+
+    scripted(monkeypatch, wrong)
+    assert start(api).json()["code"] == "invalid_credentials"
+    assert start(api).json()["code"] == "invalid_credentials"
+    r = start(api)
+    assert r.status_code == 429 and r.json()["code"] == "rate_limited"
     assert start(api, username="other@school.ch").status_code == 200
+
+
+def test_a_third_party_cannot_lock_a_victim_out(api, monkeypatch):
+    monkeypatch.setattr(password_signin, "ACCOUNT_LIMIT", 2)
+
+    def wrong(prompt):
+        raise entrance.InvalidCredentials("no")
+
+    scripted(monkeypatch, wrong)
+    attacker = TestClient(app, headers={**HEADERS, "X-Schuly-User-Id": "attacker"})
+    for _ in range(2):
+        assert start(attacker).json()["code"] == "invalid_credentials"
+    assert start(attacker).status_code == 429
+    scripted(monkeypatch, lambda p: FakeBroker())
+    assert start(api).json()["status"] == "complete"  # the victim has their own, untouched limit
 
 
 def test_max_concurrent_jobs(api, monkeypatch):
@@ -599,3 +628,100 @@ def test_real_entrance_switch_push_to_otp(api, real_entrance):
     assert api.post(f"/api/auth/password/{sid}/method", json={"method": "push"}).json()["status"] == "push_pending"
     assert api.post(f"/api/auth/password/{sid}/method", json={"method": "otp"}).json()["status"] == "otp_required"
     assert api.post(f"/api/auth/password/{sid}/otp", json={"code": "123456"}).json()["status"] == "complete"
+
+
+# --- who may call, and whose job it is -------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "headers",
+    [{}, {"X-Schuly-Service-Key": "wrong", "X-Schuly-User-Id": UID}, {"X-Schuly-Service-Key": KEY}, {"X-Schuly-Service-Key": KEY, "X-Schuly-User-Id": "bad id!"}],
+)
+def test_password_routes_need_the_service_key_and_a_user_id(monkeypatch, headers):
+    scripted(monkeypatch, lambda p: pytest.fail("must not run"))
+    bare = TestClient(app)
+    body = {"username": USER, "password": PASSWORD}
+    assert bare.post("/api/auth/password/start", json=body, headers=headers).status_code == 401
+    assert bare.get("/api/auth/password/x", headers=headers).status_code == 401
+    assert bare.delete("/api/auth/password/x", headers=headers).status_code == 401
+    assert bare.post("/api/auth/password/x/method", json={"method": "push"}, headers=headers).status_code == 401
+    assert bare.post("/api/auth/password/x/otp", json={"code": "123456"}, headers=headers).status_code == 401
+    assert len(password_signin.store) == 0
+
+
+def test_routes_are_disabled_when_no_service_key_is_configured(monkeypatch):
+    monkeypatch.delenv("SCHULY_SERVICE_KEY")
+    r = TestClient(app).post("/api/auth/password/start", json={"username": USER, "password": PASSWORD}, headers={"X-Schuly-Service-Key": "", "X-Schuly-User-Id": UID})
+    assert r.status_code == 503 and PASSWORD not in r.text
+    assert TestClient(app).get("/api/auth/password/x", headers=HEADERS).status_code == 503
+
+
+def test_another_user_cannot_read_drive_or_cancel_a_job(api, monkeypatch):
+    approve = threading.Event()
+    scripted(monkeypatch, lambda p: drive(p, BOTH, push=push_wait(approve), code="123456"))
+    sid = start(api).json()["sign_in_id"]
+    other = TestClient(app, headers={**HEADERS, "X-Schuly-User-Id": "someone-else"})
+    assert other.get(f"/api/auth/password/{sid}").status_code == 404
+    assert other.post(f"/api/auth/password/{sid}/method", json={"method": "push"}).status_code == 404
+    assert other.post(f"/api/auth/password/{sid}/otp", json={"code": "123456"}).status_code == 404
+    assert other.delete(f"/api/auth/password/{sid}").status_code == 204
+    assert api.get(f"/api/auth/password/{sid}").json()["status"] == "mfa_required"  # still alive and untouched
+
+
+def test_starting_the_same_account_as_another_user_does_not_cancel_the_first_job(api, monkeypatch):
+    scripted(monkeypatch, lambda p: drive(p, BOTH))
+    first = start(api).json()["sign_in_id"]
+    other = TestClient(app, headers={**HEADERS, "X-Schuly-User-Id": "someone-else"})
+    second = start(other).json()["sign_in_id"]
+    assert api.get(f"/api/auth/password/{first}").status_code == 200
+    assert other.get(f"/api/auth/password/{second}").status_code == 200
+
+
+def test_own_earlier_job_is_replaced_only_after_the_password_passed(api, monkeypatch):
+    scripted(monkeypatch, lambda p: drive(p, BOTH))
+    first = start(api).json()["sign_in_id"]
+
+    def wrong(prompt):
+        raise entrance.InvalidCredentials("no")
+
+    scripted(monkeypatch, wrong)
+    assert start(api).json()["code"] == "invalid_credentials"
+    assert api.get(f"/api/auth/password/{first}").status_code == 200  # a failed attempt must not kill it
+    scripted(monkeypatch, lambda p: drive(p, BOTH))
+    third = start(api).json()["sign_in_id"]
+    assert api.get(f"/api/auth/password/{first}").status_code == 404
+    assert api.get(f"/api/auth/password/{third}").status_code == 200
+
+
+# --- authenticator code budget -----------------------------------------------------------------------------
+def wrong_codes(api, sid, n):
+    return [api.post(f"/api/auth/password/{sid}/otp", json={"code": f"11111{i}"}).json() for i in range(n)]
+
+
+def test_otp_budget_per_job_cannot_be_reset_by_rechoosing(api, monkeypatch):
+    scripted(monkeypatch, lambda p: drive(p, BOTH, code="654321"))
+    sid = start(api).json()["sign_in_id"]
+    api.post(f"/api/auth/password/{sid}/method", json={"method": "otp"})
+    assert [r["status"] for r in wrong_codes(api, sid, 3)] == ["otp_invalid"] * 3  # first round of 3 spent
+    assert api.post(f"/api/auth/password/{sid}/method", json={"method": "otp"}).json()["attempts_left"] == 2
+    first = api.post(f"/api/auth/password/{sid}/otp", json={"code": "222221"}).json()
+    last = api.post(f"/api/auth/password/{sid}/otp", json={"code": "222222"}).json()
+    assert first["status"] == "otp_invalid" and first["attempts_left"] == 1
+    assert last["status"] == "error" and last["code"] == "otp_exhausted"
+    assert api.post(f"/api/auth/password/{sid}/method", json={"method": "otp"}).status_code == 409
+
+
+def test_otp_budget_per_account_holds_across_jobs(api, monkeypatch):
+    monkeypatch.setattr(password_signin, "OTP_ACCOUNT_BUDGET", 4)
+    scripted(monkeypatch, lambda p: drive(p, BOTH, code="654321"))
+    sid = start(api).json()["sign_in_id"]
+    api.post(f"/api/auth/password/{sid}/method", json={"method": "otp"})
+    wrong_codes(api, sid, 3)  # 3 of the 4 hourly codes
+    sid2 = start(api).json()["sign_in_id"]
+    api.post(f"/api/auth/password/{sid2}/method", json={"method": "otp"})
+    first = api.post(f"/api/auth/password/{sid2}/otp", json={"code": "333331"}).json()  # the 4th
+    assert first["status"] == "error" and first["code"] == "otp_exhausted"  # the 4th wrong code spends the hourly budget
+    sid3 = start(api).json()["sign_in_id"]  # budget gone: a fresh job is refused codes at once
+    api.post(f"/api/auth/password/{sid3}/method", json={"method": "otp"})
+    assert until(api, sid3, "error")["code"] == "otp_exhausted"
+    other = TestClient(app, headers={**HEADERS, "X-Schuly-User-Id": "someone-else"})
+    sid4 = start(other).json()["sign_in_id"]
+    assert other.post(f"/api/auth/password/{sid4}/method", json={"method": "otp"}).json()["status"] == "otp_required"

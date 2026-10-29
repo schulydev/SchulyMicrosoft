@@ -28,8 +28,10 @@ JOB_TTL = int(os.getenv("PASSWORD_SIGNIN_TTL", "600"))  # hard cap per job, seco
 JOB_TTL = min(JOB_TTL, 600)
 DONE_TTL = 120  # a finished job stays readable this long (a lost response can be re-read)
 MAX_JOBS = int(os.getenv("PASSWORD_SIGNIN_MAX_JOBS", "100"))
-CLIENT_LIMIT = int(os.getenv("PASSWORD_SIGNIN_CLIENT_LIMIT", "30"))  # starts per client per minute
-ACCOUNT_LIMIT = int(os.getenv("PASSWORD_SIGNIN_ACCOUNT_LIMIT", "6"))  # starts per account per 10 minutes
+CLIENT_LIMIT = int(os.getenv("PASSWORD_SIGNIN_CLIENT_LIMIT", "30"))  # starts per Schuly user per minute
+ACCOUNT_LIMIT = int(os.getenv("PASSWORD_SIGNIN_ACCOUNT_LIMIT", "6"))  # FAILED password attempts per (Schuly user, account) per 10 minutes
+OTP_JOB_BUDGET = 5  # authenticator codes tried per job, however often the method is re-chosen
+OTP_ACCOUNT_BUDGET = 10  # codes per (Schuly user, account) per hour, across jobs
 PUSH_TIMEOUT = 120
 PUSH_INTERVAL = 1.5
 OTP_ATTEMPTS = entrance.OTP_ATTEMPTS
@@ -46,6 +48,7 @@ MESSAGES = {
     "unsupported": "This Microsoft account can't be signed in with a password here.",
     "blocked": "Microsoft blocked this sign-in because of a security policy.",
     "failed": "The Microsoft sign-in failed.",
+    "otp_exhausted": "Too many wrong codes. Start the sign-in again later.",
 }
 
 
@@ -71,6 +74,20 @@ class RateLimiter:
             hits.append(now)
             return True
 
+    def add(self, key: str):
+        with self._lock:
+            self._hits.setdefault(key, deque()).append(time.monotonic())
+
+    def count(self, key: str, window: float) -> int:
+        now = time.monotonic()
+        with self._lock:
+            hits = self._hits.get(key)
+            if not hits:
+                return 0
+            while hits and now - hits[0] > window:
+                hits.popleft()
+            return len(hits)
+
     def sweep(self, window: float = 600):
         now = time.monotonic()
         with self._lock:
@@ -83,6 +100,8 @@ def failure_for(ex: BaseException) -> tuple[str, str]:
     exception text is never copied into a response."""
     if isinstance(ex, entrance.InvalidCredentials):
         code = "invalid_credentials"
+    elif isinstance(ex, entrance.OtpRejected):
+        code = "otp_exhausted"
     elif isinstance(ex, entrance.Unsupported):
         code = "unsupported"
     elif isinstance(ex, entrance.Blocked):
@@ -95,9 +114,15 @@ def failure_for(ex: BaseException) -> tuple[str, str]:
 class SignInJob(MfaPrompt):
     """Progress of one sign-in, and the `MfaPrompt` Entrance calls back into. Holds no password."""
 
-    def __init__(self, job_id: str, owner: str):
+    def __init__(self, job_id: str, user: str, account: str, failures: "RateLimiter", otp_hits: "RateLimiter"):
         self.id = job_id
-        self.owner = owner  # hash of the account name, only to replace an older job of the same account
+        self.user = user  # hash of the Schuly user id that started the job; only that user may touch it
+        self.acct = account  # hash of (Schuly user, Microsoft account name)
+        self.replaces: str | None = None  # this user's earlier job for the same account, replaced once the password passed
+        self._failures = failures
+        self._otp_hits = otp_hits
+        self.otp_used = 0
+        self._budget_out = False
         self.expires = time.monotonic() + JOB_TTL
         self.done_at: float | None = None
         self.cond = threading.Condition()
@@ -220,12 +245,17 @@ class SignInJob(MfaPrompt):
 
     def otp(self, attempt):
         with self.cond:
-            self.attempts_left = OTP_ATTEMPTS - attempt + 1
+            if self.otp_used >= OTP_JOB_BUDGET or self._otp_hits.count(self.acct, 3600) >= OTP_ACCOUNT_BUDGET:
+                self._budget_out = True
+                raise entrance.OtpRejected("authenticator code budget spent", attempts=self.otp_used)
+            self.attempts_left = min(OTP_ATTEMPTS - attempt + 1, OTP_JOB_BUDGET - self.otp_used)
             self._set(OTP_REQUIRED, otp_invalid=attempt > 1)
             self._wait(lambda: self.code is not None or self.requested is not None)
             if self.code is None:
                 raise MfaSwitch()
             code, self.code = self.code, None
+            self.otp_used += 1
+            self._otp_hits.add(self.acct)
             self._set(VERIFYING)
             return code
 
@@ -234,6 +264,8 @@ class SignInJob(MfaPrompt):
             self._retry_notice = error.state
             return True
         if isinstance(error, entrance.OtpRejected):
+            if self._budget_out or self.otp_used >= OTP_JOB_BUDGET:
+                return False  # terminal: a fresh sign-in is required
             with self.cond:
                 self.attempts_left = 0
                 self.otp_invalid = True
@@ -252,6 +284,8 @@ class SignInJob(MfaPrompt):
             log.info("password sign-in %s cancelled", self.id)
         except BaseException as ex:  # noqa: BLE001 - the worker must always end in a terminal state
             code, message = failure_for(ex)
+            if code == "invalid_credentials":
+                self._failures.add(self.acct)  # only failed password attempts count against the limiter
             log.warning("password sign-in %s ended: %s (%s)", self.id, code, type(ex).__name__)
             with self.cond:
                 self.done_at = time.monotonic()
@@ -267,52 +301,64 @@ class JobStore:
         self._jobs: dict[str, SignInJob] = {}
         self._by_owner: dict[str, str] = {}
         self._lock = threading.Lock()
-        self._clients = RateLimiter()
-        self._accounts = RateLimiter()
+        self._starts = RateLimiter()
+        self._failures = RateLimiter()
+        self._otp_hits = RateLimiter()
 
     @staticmethod
-    def _owner(username: str) -> str:
-        return hashlib.sha256(username.strip().lower().encode()).hexdigest()
+    def _hash(*parts: str) -> str:
+        return hashlib.sha256("\x00".join(p.strip().lower() for p in parts).encode()).hexdigest()
 
-    def start(self, client: str, username: str, secret: Secret) -> SignInJob:
-        owner = self._owner(username)
-        if not self._clients.allow(f"client:{client}", CLIENT_LIMIT, 60):
-            raise RateLimited("Too many sign-in attempts from this client.")
-        if not self._accounts.allow(f"account:{owner}", ACCOUNT_LIMIT, 600):
-            raise RateLimited("Too many sign-in attempts for this account.")
-        job = SignInJob(secrets.token_urlsafe(24), owner)
+    def start(self, user_id: str, username: str, secret: Secret) -> SignInJob:
+        user = self._hash(user_id)
+        account = self._hash(user_id, username)
+        if not self._starts.allow(user, CLIENT_LIMIT, 60):
+            raise RateLimited("Too many sign-in attempts.")
+        if self._failures.count(account, 600) >= ACCOUNT_LIMIT:
+            raise RateLimited("Too many failed attempts for this account. Try again later.")
+        job = SignInJob(secrets.token_urlsafe(24), user, account, self._failures, self._otp_hits)
         with self._lock:
             self._prune()
-            previous = self._jobs.get(self._by_owner.get(owner, ""))
-            if previous is not None:
-                previous.stop()
-                self._jobs.pop(previous.id, None)
             if len(self._jobs) >= MAX_JOBS:
                 raise RateLimited("Too many sign-ins in progress.")
+            job.replaces = self._by_owner.get(account)
             self._jobs[job.id] = job
-            self._by_owner[owner] = job.id
         threading.Thread(target=job.run, args=(username.strip(), secret), name=f"pwd-signin-{job.id[:6]}", daemon=True).start()
         return job
 
-    def get(self, job_id: str) -> SignInJob | None:
+    def promote(self, job: SignInJob):
+        """The password passed: this job becomes the user's current one for the account and replaces their earlier one."""
+        with self._lock:
+            if job.id not in self._jobs:
+                return
+            previous = self._jobs.get(job.replaces or "")
+            if previous is not None and previous.user == job.user:
+                self._drop(previous)
+            self._by_owner[job.acct] = job.id
+
+    def get(self, job_id: str, user_id: str) -> SignInJob | None:
+        """The job, only for the Schuly user that started it (anyone else gets None, like an unknown id)."""
         with self._lock:
             job = self._jobs.get(job_id)
-            if job is not None and self._expired(job):
+            if job is None or job.user != self._hash(user_id):
+                return None
+            if self._expired(job):
                 self._drop(job)
                 return None
             return job
 
-    def remove(self, job_id: str):
+    def remove(self, job_id: str, user_id: str):
         with self._lock:
             job = self._jobs.get(job_id)
-            if job is not None:
+            if job is not None and job.user == self._hash(user_id):
                 self._drop(job)
 
     def sweep(self):
         with self._lock:
             self._prune()
-        self._clients.sweep(60)
-        self._accounts.sweep(600)
+        self._starts.sweep(60)
+        self._failures.sweep(600)
+        self._otp_hits.sweep(3600)
 
     def clear(self):
         with self._lock:
@@ -320,8 +366,9 @@ class JobStore:
                 job.stop()
             self._jobs.clear()
             self._by_owner.clear()
-        self._clients = RateLimiter()
-        self._accounts = RateLimiter()
+        self._starts = RateLimiter()
+        self._failures = RateLimiter()
+        self._otp_hits = RateLimiter()
 
     def __len__(self):
         return len(self._jobs)
@@ -334,8 +381,8 @@ class JobStore:
     def _drop(self, job: SignInJob):
         job.stop()
         self._jobs.pop(job.id, None)
-        if self._by_owner.get(job.owner) == job.id:
-            del self._by_owner[job.owner]
+        if self._by_owner.get(job.acct) == job.id:
+            del self._by_owner[job.acct]
 
     def _prune(self):
         for job in [j for j in self._jobs.values() if self._expired(j)]:
