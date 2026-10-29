@@ -40,6 +40,7 @@ src/
   chat_read.py          # chat messages + media/files/cards for the web
   chat_html.py          # composer HTML allowlist sanitizer, body media/card extraction
   chat_send.py          # rich sends: hosted images, GIFs, mentions, OneDrive file shares
+  people_photos.py      # profile photos by e-mail (mail senders), cached per account
   gifs.py               # Giphy search (needs GIPHY_API_KEY; 503 without)
 tests/                  # pytest, fully mocked (no network)
 ```

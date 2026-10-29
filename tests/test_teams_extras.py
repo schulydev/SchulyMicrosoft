@@ -208,7 +208,7 @@ HOSTED_SRC = "https://graph.microsoft.com/v1.0/chats/19:g@thread.v2/messages/171
 
 def test_messages_carry_media_files_and_cards(env):
     note, _ = env
-    sticker = {"type": "AdaptiveCard", "body": [{"type": "Image", "url": "https://stickers.example/cat.gif", "altText": "cat"}]}
+    sticker = {"type": "AdaptiveCard", "body": [{"type": "Image", "url": "https://stickers.newfuture.cc/stickers/a/cat.gif", "altText": "cat"}]}
     note.messages = [{
         "id": "171",
         "body": {"contentType": "html", "content": f'<p><img src="{HOSTED_SRC}" width="393.7" alt="Bild"><img alt="Cat GIF" src="{GIF_URL}" itemtype="http://schema.skype.com/Giphy"><img src="https://evil.example/a.png"></p>'},
@@ -219,12 +219,12 @@ def test_messages_carry_media_files_and_cards(env):
     }]
     m = TestClient(app).get("/api/chats/19:g@thread.v2/messages", headers=H).json()[0]
     assert m["media"] == [
-        {"kind": "hosted", "url": HOSTED_SRC, "hostedContentId": "aWQ9eA==", "alt": "Bild", "width": 394, "height": None},
+        {"kind": "hosted", "url": None, "hostedContentId": "aWQ9eA==", "alt": "Bild", "width": 394, "height": None},
         {"kind": "gif", "url": GIF_URL, "hostedContentId": None, "alt": "Cat GIF", "width": None, "height": None},
     ]
     assert m["files"] == [{"id": "a1", "name": "clip.webm", "contentUrl": "https://x-my.sharepoint.com/clip.webm", "contentType": "video/webm", "size": 1234}]
     assert m["cards"][0]["content"] == sticker
-    assert m["cards"][0]["sticker"] == {"url": "https://stickers.example/cat.gif", "alt": "cat"}
+    assert m["cards"][0]["sticker"] == {"url": "https://stickers.newfuture.cc/stickers/a/cat.gif", "alt": "cat"}
     assert m["importance"] == "normal"
 
 
@@ -234,7 +234,7 @@ def test_hosted_content_proxy_serves_only_images(env):
     r = TestClient(app).get("/api/chats/19:g@thread.v2/messages/171/hostedContents/aWQ9eA==", headers=H)
     assert r.status_code == 200 and r.content == PNG
     assert r.headers["content-type"] == "image/png"
-    assert r.headers["cache-control"] == "private, max-age=3600"
+    assert r.headers["cache-control"] == "no-store"
     assert r.headers["x-content-type-options"] == "nosniff"
     assert r.headers[config.REFRESH_TOKEN_HEADER] == "rotated-frt"
     note.hosted = b"<html><script>alert(1)</script>"
@@ -338,24 +338,46 @@ def test_meeting_invites_the_chat_members_and_returns_the_join_url(env):
     assert [a["emailAddress"]["address"] for a in event["attendees"]] == ["bo@school.ch"]
 
 
-def test_gif_search_needs_a_giphy_key(monkeypatch):
+def test_gif_search_needs_a_giphy_key(env, monkeypatch):
     monkeypatch.delenv("GIPHY_API_KEY", raising=False)
-    r = TestClient(app).get("/api/gifs/search", params={"q": "cat"})
+    r = TestClient(app).get("/api/gifs/search", headers=H, params={"q": "cat"})
     assert r.status_code == 503
 
 
-def test_gif_search_returns_only_giphy_urls(monkeypatch):
+def test_gif_search_needs_a_microsoft_sign_in(env, monkeypatch):
+    monkeypatch.setenv("GIPHY_API_KEY", "k")
+    client = TestClient(app)
+    assert client.get("/api/gifs/search", params={"q": "cat"}).status_code == 422
+    assert client.get("/api/gifs/trending").status_code == 422
+    assert client.get("/api/gifs/trending", headers={config.REFRESH_TOKEN_HEADER: "has spaces in it"}).status_code == 401
+
+
+def test_gif_search_is_rate_limited_per_account(env, monkeypatch):
     from src import gifs
+    monkeypatch.setenv("GIPHY_API_KEY", "k")
+    monkeypatch.setattr(gifs, "_search", lambda key, query, limit: [])
+    client = TestClient(app)
+    codes = [client.get("/api/gifs/search", headers=H, params={"q": f"q{i}"}).status_code for i in range(gifs.RATE_PER_MINUTE + 1)]
+    assert codes[:-1] == [200] * gifs.RATE_PER_MINUTE and codes[-1] == 429
+
+
+def test_gif_search_returns_only_giphy_urls(env, monkeypatch):
+    from src import gifs
+    calls = []
 
     class Http:
         def get(self, url, params=None, timeout=None):
+            calls.append(url)
             assert url.endswith("/search") and params["q"] == "cat"
             return FakeResponse(200, {"data": [{"id": "g1", "title": "Cat", "images": {"downsized_medium": {"url": GIF_URL + "?cid=1", "width": "200", "height": "150"}, "fixed_width_small": {"url": GIF_URL}}}, {"id": "bad", "images": {"original": {"url": "https://evil.example/x.gif"}}}]})
 
     monkeypatch.setenv("GIPHY_API_KEY", "k")
     monkeypatch.setattr(gifs, "http_client", lambda: Http())
-    r = TestClient(app).get("/api/gifs/search", params={"q": "cat", "limit": 5})
+    gifs._results.set(("cat", 5), None, 0)
+    r = TestClient(app).get("/api/gifs/search", headers=H, params={"q": "cat", "limit": 5})
     assert r.json() == [{"id": "g1", "title": "Cat", "url": GIF_URL, "previewUrl": GIF_URL, "width": 200, "height": 150}]
+    TestClient(app).get("/api/gifs/search", headers=H, params={"q": "Cat", "limit": 5})
+    assert len(calls) == 1  # cached by (query, limit)
 
 
 def test_account_cache_expires_and_is_bounded(monkeypatch):
@@ -369,3 +391,74 @@ def test_account_cache_expires_and_is_bounded(monkeypatch):
     for k in "bcd":
         cache.set(k, k, 100)
     assert cache.get("b") is None and cache.get("d") == "d"
+
+
+def test_no_response_carrying_a_token_is_cacheable(env, http, monkeypatch):
+    """Every route that can hand back a rotated refresh token must forbid storing the response."""
+    from src import gifs
+    note, _ = env
+    monkeypatch.setenv("GIPHY_API_KEY", "k")
+    monkeypatch.setattr(gifs, "_search", lambda key, query, limit: [])
+    monkeypatch.setattr(note, "get", lambda path, params=None, raw=False: PNG if raw == "bytes" else {"id": "me-id"})
+    client = TestClient(app)
+    responses = [
+        client.get("/api/chats/19:g@thread.v2/photo", headers=H),
+        client.get("/api/chats/19:g@thread.v2/messages/171/hostedContents/aWQ9eA==", headers=H),
+        client.get("/api/people/photo", headers=H, params={"email": "ana@school.ch"}),
+        client.get("/api/users/u1/photo", headers=H),
+        client.get("/api/gifs/trending", headers=H),
+        client.get("/api/chats", headers=H),
+    ]
+    for r in responses:
+        assert r.status_code == 200, r.url
+        assert config.REFRESH_TOKEN_HEADER in r.headers, r.url
+        cache_control = r.headers.get("cache-control", "")
+        assert "max-age" not in cache_control and "public" not in cache_control and "private" not in cache_control, r.url
+        assert cache_control == "no-store" or r.headers["content-type"].startswith("application/json"), r.url
+
+
+@pytest.mark.parametrize("src", [
+    "https://evil.com/v1.0/chats/x/messages/y/hostedContents/z/$value",
+    "https://graph.microsoft.com.evil.com/v1.0/chats/x/messages/y/hostedContents/z/$value",
+    "http://graph.microsoft.com/v1.0/chats/x/messages/y/hostedContents/z/$value",
+    "https://graph.microsoft.com:8443/v1.0/chats/x/messages/y/hostedContents/z/$value",
+    "https://user@graph.microsoft.com/v1.0/chats/x/messages/y/hostedContents/z/$value",
+    "https://graph.microsoft.com/v2.0/chats/x/messages/y/hostedContents/z/$value",
+    "https://graph.microsoft.com/v1.0/evil/v1.0/chats/x/messages/y/hostedContents/z/$value",
+    "https://evil.com/x?u=https://graph.microsoft.com/v1.0/chats/x/messages/y/hostedContents/z/$value",
+])
+def test_hosted_media_needs_exactly_a_graph_url(src):
+    assert chat_html.media({"body": {"content": f'<img src="{src}">'}}) == []
+
+
+def test_hosted_media_accepts_v1_and_beta_and_returns_no_raw_src():
+    for version in ("v1.0", "beta"):
+        src = f"https://graph.microsoft.com/{version}/chats/19:a/messages/1/hostedContents/aWQ9eA==/$value"
+        assert chat_html.media({"body": {"content": f'<img src="{src}">'}}) == [{"kind": "hosted", "url": None, "hostedContentId": "aWQ9eA==", "alt": None, "width": None, "height": None}]
+
+
+@pytest.mark.parametrize("url", ["https://media2.giphy.com.evil.com/a.gif", "https://evilgiphy.com/a.gif", "https://evil.com/media2.giphy.com/a.gif", "http://media2.giphy.com/a.gif", "https://x.media2.giphy.com/a.gif", "https://media2.giphy.com:444/a.gif"])
+def test_gif_hosts_are_exact_and_https(url):
+    assert not chat_html.is_gif_host(url)
+    assert chat_html.media({"body": {"content": f'<img src="{url}">'}}) == []
+    card = {"type": "AdaptiveCard", "body": [{"type": "Image", "url": url}]}
+    assert chat_html.cards({"attachments": [{"contentType": "application/vnd.microsoft.card.adaptive", "content": json.dumps(card)}]})[0]["sticker"] is None
+
+
+def test_oversized_sends_are_refused_before_parsing(env):
+    client = TestClient(app)
+    r = client.post("/api/chats/c1/messages", headers={**H, "Content-Length": str(200 * 1024 * 1024), "Content-Type": "multipart/form-data; boundary=x"}, content=b"--x--")
+    assert r.status_code == 413
+    big = b"--x\r\nContent-Disposition: form-data; name=\"files\"; filename=\"a.bin\"\r\n\r\n" + b"0" * (300 * 1024) + b"\r\n--x--\r\n"
+    import src.app as app_module
+    old = app_module.MAX_SEND_BYTES
+    app_module.MAX_SEND_BYTES = 100 * 1024
+    try:
+        def chunks():
+            for i in range(0, len(big), 64 * 1024):
+                yield big[i:i + 64 * 1024]
+        r = client.post("/api/chats/c1/messages", headers={**H, "Content-Type": "multipart/form-data; boundary=x"}, content=chunks())
+        assert r.status_code == 413
+    finally:
+        app_module.MAX_SEND_BYTES = old
+    assert client.post("/api/chats/c1/messages", headers={config.REFRESH_TOKEN_HEADER: "bad token with spaces"}, json={"content": "x"}).status_code == 401
