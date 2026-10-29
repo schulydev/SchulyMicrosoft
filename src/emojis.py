@@ -66,7 +66,7 @@ _EMOJI_ANY = re.compile(_EMOJI_TAG.pattern + "|" + _EMOJI_IMG.pattern, re.IGNORE
 _READONLY = re.compile(r"<readonly\b[^>]*>\s*(<img\b[^>]*>)\s*</readonly>", re.IGNORECASE)
 _ATTR = re.compile(r"""([\w:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
 _TAG = re.compile(r"<[^>]*>")
-_EMOJI_OUT = re.compile(r"<emoji\b[^>]*>(?:</emoji>)?")
+_EMOJI_OUT = re.compile(r"<emoji\b[^>]*>(?:[^<]*</emoji>)?")
 
 
 class EmojiError(RuntimeError):
@@ -288,7 +288,7 @@ def _custom_document(emoji_id: str, src: str) -> tuple[str, str] | None:
 
 
 def message_emojis(content: str, cat: Catalogue | None = None) -> tuple[str, list[dict]]:
-    """(content with each emoji turned into `<emoji key="e0" alt="..."></emoji>`, the emoji list).
+    """(content with each emoji turned into `<emoji key="e0" alt="...">...</emoji>` (the alt as text, so clients that strip the tag still show the emoji), the emoji list).
 
     Entries are `{key, id, alt, title, kind: "teams"|"custom", animated, staticUrl, animatedUrl, frames, frameMs, size, firstFrame, documentId}`;
     one entry per distinct emoji, however often it repeats. `size` is the sprite width to use: 50 for a message that is only emoji, else 30.
@@ -323,7 +323,7 @@ def message_emojis(content: str, cat: Catalogue | None = None) -> tuple[str, lis
                 item = cat.by_id.get(base) if cat else None
                 entries[key] = {"key": f"e{len(entries)}", "id": raw_id, "alt": alt or (item or {}).get("unicode") or "", "title": title or (item or {}).get("title") or "", "kind": "teams", "item": item, "base": base, "tone": tone, "documentId": None}
         e = entries[key]
-        return f'<emoji key="{e["key"]}" alt="{html.escape(e["alt"], quote=True)}"></emoji>'
+        return f'<emoji key="{e["key"]}" alt="{html.escape(e["alt"], quote=True)}">{html.escape(e["alt"])}</emoji>'
 
     content = _EMOJI_ANY.sub(replace, content)
     if not entries:

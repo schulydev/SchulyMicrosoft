@@ -75,7 +75,7 @@ def account(monkeypatch):
 # --- parsing the markup Graph returns ----------------------------------------------------
 def test_the_real_graph_markup_becomes_a_keyed_placeholder_and_an_entry(cdn):
     content, found = emojis.message_emojis(HUNDRED, emojis.catalogue("default"))
-    assert content == '<p><emoji key="e0" alt="\U0001F4AF"></emoji></p>'
+    assert content == '<p><emoji key="e0" alt="\U0001F4AF">\U0001F4AF</emoji></p>'
     assert found == [{"key": "e0", "id": "1f4af_hundredpointssymbol", "alt": "\U0001F4AF", "title": "Hundred points", "kind": "teams", "documentId": None, "animated": True,
                       "staticUrl": f"{emojis.ASSET_BASE}/1f4af_hundredpointssymbol/default/50_f.png?v=v11",
                       "animatedUrl": f"{emojis.ASSET_BASE}/1f4af_hundredpointssymbol/default/50_anim_f.png?v=v11",
