@@ -9,6 +9,8 @@ on each read. Reads return the rotated refresh token in the X-MS-Refresh-Token h
 import asyncio
 import base64
 import binascii
+import hmac
+import os
 import json
 import logging
 import re
@@ -18,7 +20,7 @@ from datetime import timezone
 from urllib.parse import quote
 from collections.abc import Callable
 
-from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -150,6 +152,23 @@ async def browser_complete(body: BrowserCompleteRequest):
     return DevicePollResponse(status="complete", refresh_token=refresh_token, account=account)
 
 
+USER_ID_PATTERN_SCHULY = re.compile(r"[A-Za-z0-9._:@-]{1,128}")
+
+
+def _password_caller(request: Request) -> str:
+    """Gate for the password routes: the shared service key plus the Schuly user id. Returns the user id."""
+    expected = os.getenv(config.SERVICE_KEY_ENV, "")
+    if not expected:
+        raise HTTPException(status_code=503, detail="Password sign-in is disabled: no service key is configured.")
+    given = request.headers.get(config.SERVICE_KEY_HEADER, "")
+    if not hmac.compare_digest(given.encode(), expected.encode()):
+        raise HTTPException(status_code=401, detail="Missing or invalid service key.")
+    user_id = request.headers.get(config.USER_ID_HEADER, "")
+    if not USER_ID_PATTERN_SCHULY.fullmatch(user_id):
+        raise HTTPException(status_code=401, detail="Missing or invalid user id.")
+    return user_id
+
+
 SIGN_IN_WAIT = 60  # seconds /start waits for the sign-in to finish or reach the method choice
 METHOD_WAIT = 30  # seconds /method waits for the push number / the code prompt
 OTP_WAIT = 45  # seconds /otp waits for Microsoft's verdict
@@ -188,7 +207,7 @@ async def _sign_in_response(job: password_signin.SignInJob) -> PasswordSignInRes
 
 
 @app.post("/api/auth/password/start", response_model=PasswordSignInResponse, response_model_exclude_none=True, tags=["Auth"])
-async def password_start(body: PasswordStartRequest, request: Request):
+async def password_start(body: PasswordStartRequest, user_id: str = Depends(_password_caller)):
     """Sign in with the Microsoft password. The password is used once, held only in memory for this
     sign-in and never stored, cached, logged or returned. Completes straight away when Microsoft asks
     for no MFA; otherwise returns mfa_required with the methods Microsoft offers."""
@@ -196,19 +215,22 @@ async def password_start(body: PasswordStartRequest, request: Request):
     username = body.username
     body.password = None  # the request model no longer references the password
     try:
-        job = password_signin.store.start(request.client.host if request.client else "unknown", username, secret)
+        job = password_signin.store.start(user_id, username, secret)
     except password_signin.RateLimited as ex:
         return _sign_in_error(429, "rate_limited", str(ex))
     finally:
         del secret
     await _wait_settled(job, -1, SIGN_IN_WAIT)
+    snap = job.snapshot()
+    if snap["state"] != password_signin.WORKING and snap.get("code") != "invalid_credentials":
+        password_signin.store.promote(job)  # the password passed: this replaces the user's earlier attempt
     return await _sign_in_response(job)
 
 
 @app.post("/api/auth/password/{sign_in_id}/method", response_model=PasswordSignInResponse, response_model_exclude_none=True, tags=["Auth"])
-async def password_method(sign_in_id: str, body: PasswordMethodRequest):
+async def password_method(sign_in_id: str, body: PasswordMethodRequest, user_id: str = Depends(_password_caller)):
     """Choose (or switch to) push or otp. push -> push_pending with the number to tap; otp -> otp_required."""
-    job = password_signin.store.get(sign_in_id)
+    job = password_signin.store.get(sign_in_id, user_id)
     if job is None:
         return _sign_in_error(404, "not_found", "Unknown or expired sign-in.")
     version = job.snapshot()["version"]
@@ -223,9 +245,9 @@ async def password_method(sign_in_id: str, body: PasswordMethodRequest):
 
 
 @app.post("/api/auth/password/{sign_in_id}/otp", response_model=PasswordSignInResponse, response_model_exclude_none=True, tags=["Auth"])
-async def password_otp(sign_in_id: str, body: PasswordOtpRequest):
+async def password_otp(sign_in_id: str, body: PasswordOtpRequest, user_id: str = Depends(_password_caller)):
     """Submit the authenticator code. complete, or otp_invalid with attempts_left (3 tries per method choice)."""
-    job = password_signin.store.get(sign_in_id)
+    job = password_signin.store.get(sign_in_id, user_id)
     if job is None:
         return _sign_in_error(404, "not_found", "Unknown or expired sign-in.")
     code = re.sub(r"[\s-]", "", body.code)
@@ -239,16 +261,16 @@ async def password_otp(sign_in_id: str, body: PasswordOtpRequest):
 
 
 @app.get("/api/auth/password/{sign_in_id}", response_model=PasswordSignInResponse, response_model_exclude_none=True, tags=["Auth"])
-async def password_status(sign_in_id: str):
-    job = password_signin.store.get(sign_in_id)
+async def password_status(sign_in_id: str, user_id: str = Depends(_password_caller)):
+    job = password_signin.store.get(sign_in_id, user_id)
     if job is None:
         return _sign_in_error(404, "not_found", "Unknown or expired sign-in.")
     return await _sign_in_response(job)
 
 
 @app.delete("/api/auth/password/{sign_in_id}", status_code=204, tags=["Auth"])
-async def password_cancel(sign_in_id: str):
-    password_signin.store.remove(sign_in_id)
+async def password_cancel(sign_in_id: str, user_id: str = Depends(_password_caller)):
+    password_signin.store.remove(sign_in_id, user_id)
     return Response(status_code=204)
 
 

@@ -33,7 +33,12 @@ that call and is never stored, cached, logged or returned. If Microsoft asks for
 and `start` returns the methods the account offers (`push` = Authenticator number matching, `otp` = a
 code from an authenticator app); `method` picks one (and may switch mid-way), `otp` submits the code.
 No MFA means `start` completes right away. Federated/ADFS accounts, unsupported methods and
-Conditional Access blocks return `error` with code `unsupported` / `blocked`. Sign-in jobs live in
+Conditional Access blocks return `error` with code `unsupported` / `blocked`.
+These routes are callable only by the Schuly plugin: every request needs the shared secret in
+`X-Schuly-Service-Key` (must equal the `SCHULY_SERVICE_KEY` env var; if that is unset the routes answer 503)
+and the signed-in Schuly user's id in `X-Schuly-User-Id` (else 401). A job belongs to that user: anyone else gets
+404 for it. Only failed password attempts count against the per-(user, account) limit, and authenticator
+codes are budgeted (5 per job, 10 per hour per user and account; then `error` / `otp_exhausted`). Sign-in jobs live in
 memory for at most 10 minutes, so **run exactly one process** (`asgi.py` pins `workers=1`).
 
 Either way the result is a FOCI family refresh token that the **caller stores** and sends
