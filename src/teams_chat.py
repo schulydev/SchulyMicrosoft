@@ -81,6 +81,8 @@ def _new_session(broker, cache) -> tuple[str, str]:
         raise ChatServiceError(502, "authz returned no skype token or chat service")
     lifetime = int((body.get("tokens") or {}).get("expiresIn") or 3600)
     session = (skype, service)
+    ams = _media_host((body.get("regionGtms") or {}).get("amsV2") or (body.get("regionGtms") or {}).get("ams"))
+    cache.set("teams_ams", ams, max(60, lifetime - SESSION_MARGIN))
     cache.set("teams_session", session, max(60, lifetime - SESSION_MARGIN))
     return session
 
@@ -88,6 +90,15 @@ def _new_session(broker, cache) -> tuple[str, str]:
 def _drop_session(broker):
     # A skype token the chat service no longer accepts; the next call mints a fresh one.
     for_broker(broker).set("teams_session", None, 0)
+
+
+def _media_host(value) -> str | None:
+    """The media service base URL when it is an https Microsoft media host, else None."""
+    if not isinstance(value, str):
+        return None
+    parts = urlsplit(value)
+    host = (parts.hostname or "").lower()
+    return f"https://{host}" if parts.scheme == "https" and parts.port in (None, 443) and any(host.endswith(h) for h in PICTURE_HOSTS) else None
 
 
 def _picture_url(value) -> str | None:
@@ -185,3 +196,38 @@ def mark_images(broker, chats: list[dict], budget: float = LOOKUP_BUDGET) -> lis
         chat["hasImage"] = found.get(chat.get("id"), False)
     return chats
 
+
+
+CUSTOM_EMOJI_VIEWS = {True: "imgt2_anim", False: "img_thumb_tiny"}
+MAX_EMOJI_BYTES = 2 * 1024 * 1024
+
+
+def custom_emoji(broker, document_id: str, animated: bool) -> bytes | None:
+    """A tenant custom emoji's picture from the Teams media service (`document_id` already validated), or None when it is gone. An animated view is a real GIF/WEBP, not a sprite."""
+    try:
+        return _custom_emoji(broker, document_id, animated)
+    except ChatServiceError as ex:
+        if ex.status != 401:
+            raise
+    return _custom_emoji(broker, document_id, animated)
+
+
+def _custom_emoji(broker, document_id: str, animated: bool) -> bytes | None:
+    skype, _ = _session(broker)
+    base = for_broker(broker).get("teams_ams")
+    if not base:
+        raise ChatServiceError(404, "no media service for this account")
+    url = f"{base}/v1/objects/{quote(document_id, safe='')}/views/{CUSTOM_EMOJI_VIEWS[animated]}"
+    with http_client().stream("GET", url, headers={"Authorization": f"skype_token {skype}"}, timeout=_TIMEOUT, follow_redirects=False) as r:
+        if r.status_code == 404:
+            return None
+        if r.status_code != 200:
+            if r.status_code == 401:
+                _drop_session(broker)
+            raise ChatServiceError(r.status_code, "custom emoji download failed")
+        data = bytearray()
+        for chunk in r.iter_bytes():
+            data.extend(chunk)
+            if len(data) > MAX_EMOJI_BYTES:
+                raise ChatServiceError(413, "custom emoji larger than 2 MB")
+    return bytes(data)

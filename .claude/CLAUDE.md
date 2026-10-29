@@ -41,6 +41,8 @@ src/
   chat_html.py          # composer HTML allowlist sanitizer, body media/card extraction
   chat_send.py          # rich sends: hosted images, GIFs, mentions, OneDrive file shares
   people_photos.py      # profile photos by e-mail (mail senders), cached per account
+  emojis.py             # Teams emoji catalogue (public CDN, 24 h cache), message emoji parsing, send allowlist
+  file_thumbs.py        # file kinds, SharePoint/OneDrive host check, chat file and drive thumbnails
   gifs.py               # Giphy search (needs GIPHY_API_KEY; 503 without)
 tests/                  # pytest, fully mocked (no network)
 ```

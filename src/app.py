@@ -23,7 +23,7 @@ from starlette.datastructures import UploadFile
 
 from outnote import GraphError
 
-from src import browser_auth, chat_html, chat_read, chat_send, config, folder_roles, gifs, outnote_client, people_photos, teams_chat
+from src import browser_auth, chat_html, chat_read, chat_send, config, emojis, file_thumbs, folder_roles, gifs, outnote_client, people_photos, teams_chat
 from src.models import BrowserCompleteRequest, BrowserStartResponse, DevicePollRequest, DevicePollResponse, DeviceStartResponse, LinkedIdentity, MailFlagRequest, MailForwardRequest, MailMessageIn, MailMoveRequest, MailReadRequest, MailReplyRequest, MeetingRequest
 
 @asynccontextmanager
@@ -47,6 +47,8 @@ EMAIL_PATTERN = re.compile(r"[^@\s<>(),;:\\\"\[\]]{1,64}@[A-Za-z0-9](?:[A-Za-z0-
 CONTENT_TYPE_PATTERN = re.compile(r"[A-Za-z0-9][\w.+-]{0,126}/[A-Za-z0-9][\w.+-]{0,126}")
 MESSAGE_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 ATTACHMENT_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,100}")
+DOCUMENT_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,120}")
+DRIVE_ITEM_PATTERN = re.compile(r"[A-Za-z0-9!=_\-+.]{1,512}")
 MAX_CHAT_FILE_BYTES = 100 * 1024 * 1024
 MAX_SEND_BYTES = 105 * 1024 * 1024  # a whole chat send: one 100 MB file plus the message and inline images
 MAX_JSON_SEND_BYTES = 256 * 1024
@@ -347,6 +349,90 @@ async def chat_file(chat_id: str, message_id: str, attachment_id: str, token: st
     headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
     # The download URL is pre-authorized and short-lived; the bytes stream through without being held.
     return StreamingResponse(outnote_client.stream_download(url, MAX_CHAT_FILE_BYTES), media_type=_safe_content_type((item.get("file") or {}).get("mimeType")), headers=headers)
+
+
+@app.get("/api/chats/{chat_id}/messages/{message_id}/files/{attachment_id}/thumbnail", tags=["Microsoft 365"], response_class=Response, responses={200: {"content": {"image/jpeg": {}}}})
+async def chat_file_thumbnail(chat_id: str, message_id: str, attachment_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), size: str = Query("medium")):
+    """The preview image of a file shared in a message (`files[].hasThumbnail`): JPEG, PNG or WEBP; 404 when the file has none. size is small, medium or large."""
+    _check_id(chat_id, CHAT_ID_PATTERN, "chat_id")
+    _check_id(message_id, MESSAGE_ID_PATTERN, "message_id")
+    _check_id(attachment_id, ATTACHMENT_ID_PATTERN, "attachment_id")
+    _check_thumbnail_size(size)
+
+    def fetch(note, broker):
+        message = note.get(chat_read.message_path(chat_id, message_id))
+        ref = next((f for f in chat_html.reference_files(message) if f.get("id") == attachment_id), None)
+        if ref is None or not file_thumbs.is_share_url(ref["contentUrl"]):
+            return None
+        return file_thumbs.chat_file_thumbnail(note, broker, ref["contentUrl"], size)
+
+    return await _thumbnail(token, fetch)
+
+
+@app.get("/api/files/{item_id}/thumbnail", tags=["Microsoft 365"], response_class=Response, responses={200: {"content": {"image/jpeg": {}}}})
+async def drive_thumbnail(item_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), size: str = Query("medium")):
+    """The preview image of a OneDrive item (an `id` from /api/files); 404 when it has none."""
+    _check_id(item_id, DRIVE_ITEM_PATTERN, "item_id")
+    _check_thumbnail_size(size)
+    return await _thumbnail(token, lambda note, broker: file_thumbs.drive_item_thumbnail(note, item_id, size))
+
+
+def _check_thumbnail_size(size: str):
+    if size not in file_thumbs.SIZES:
+        raise HTTPException(status_code=400, detail=f"size must be one of {', '.join(file_thumbs.SIZES)}")
+
+
+async def _thumbnail(token: str, fetch):
+    carrier = Response()
+    data = await _read(carrier, token, fetch, with_broker=True)
+    headers = _token_headers(carrier)
+    mime = file_thumbs.image_type((data or b"")[:12])
+    if mime is None:
+        raise HTTPException(status_code=404, detail="The file has no thumbnail.", headers=headers)
+    # The rotated refresh token may ride on this response, so nothing may store it; the plugin caches the image itself.
+    headers["Cache-Control"] = "no-store"
+    headers["X-Content-Type-Options"] = "nosniff"
+    return Response(content=data, media_type=mime, headers=headers)
+
+
+@app.get("/api/emojis/catalogue", tags=["Emojis"])
+async def emoji_catalogue(response: Response, locale: str = Query("default", max_length=20)):
+    """Teams' emoji catalogue `{locale, version, assetBase, sizes, fps, categories: [{id, title, emojis: [{id, shortcuts, unicode, title, keywords, diverse, animated, staticUrl, animatedUrl, frames, frameMs, firstFrame, etag}]}], custom}`.
+
+    Public data (no token involved), cached for 24 hours per locale. The URLs are 30 px; swap the size in the file name (20, 30, 40, 50, 60, 100) for another. An animated emoji is a vertical sprite strip of `frames` square frames shown at `frameMs` each."""
+    name = emojis.normalize_locale(locale)
+    if name is None:
+        raise HTTPException(status_code=400, detail="Invalid locale.")
+    try:
+        cat = await asyncio.to_thread(emojis.catalogue, name)
+    except emojis.EmojiError as ex:
+        raise HTTPException(status_code=502, detail=str(ex))
+    response.headers["Cache-Control"] = "public, max-age=3600"
+    return cat.payload()
+
+
+@app.get("/api/emojis/custom/{document_id}", tags=["Emojis"], response_class=Response, responses={200: {"content": {"image/png": {}}}})
+async def custom_emoji(document_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), animated: bool = Query(True)):
+    """A tenant custom emoji's picture (`emojis[].documentId` of a message emoji with kind custom). Animated is a GIF/WEBP that plays in a plain image tag."""
+    _check_id(document_id, DOCUMENT_ID_PATTERN, "document_id")
+
+    def fetch(note, broker):
+        try:
+            return teams_chat.custom_emoji(broker, document_id, animated)
+        except teams_chat.ChatServiceError as ex:
+            if ex.status in (401, 403):
+                return None
+            raise
+
+    carrier = Response()
+    data = await _read(carrier, token, fetch, with_broker=True)
+    headers = _token_headers(carrier)
+    mime = chat_send.image_type((data or b"")[:12])
+    if mime is None:
+        raise HTTPException(status_code=404, detail="No such custom emoji.", headers=headers)
+    headers["Cache-Control"] = "no-store"
+    headers["X-Content-Type-Options"] = "nosniff"
+    return Response(content=data, media_type=mime, headers=headers)
 
 
 @app.post("/api/chats/{chat_id}/messages", tags=["Microsoft 365"])
