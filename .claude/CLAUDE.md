@@ -9,10 +9,11 @@ The Schuly **Microsoft plugin** is the only caller.
 - **Stateless.** No database, no stored tokens. The caller owns the FOCI refresh token and
   sends it back in the `X-MS-Refresh-Token` header; reads return the rotated token in the
   same response header.
-- Sign-in is the **device-code flow** only — the student authenticates on Microsoft's real
+- Sign-in is the **browser sign-in** (authorization code + PKCE in a WebView, used by the
+  plugin) or the **device-code flow** — the student always authenticates on Microsoft's real
   page. This service never sees a password. Do **not** add password/credential endpoints.
 - Uses only the **public** OutNote/Entrance API (`outnote.OutNote`, `entrance.Broker`) plus
-  two documented OAuth calls for the device flow. Don't reach into their private modules.
+  the documented OAuth calls for the browser and device flows. Don't reach into their private modules.
 
 ## Code formatting
 
@@ -27,6 +28,7 @@ asgi.py                 # entrypoint (uvicorn on :8010)
 src/
   app.py                # FastAPI app + routes
   config.py             # client ids, scopes, endpoints
+  browser_auth.py       # browser sign-in (authorize URL + PKCE, code exchange)
   outnote_client.py     # thin OutNote/Entrance wrapper (device start/poll, build_client)
   models.py             # pydantic DTOs
 tests/                  # pytest, fully mocked (no network)

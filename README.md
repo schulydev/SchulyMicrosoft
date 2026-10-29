@@ -13,19 +13,29 @@ clients through OutNote's FOCI token broker.
 
 ## How sign-in works
 
-The student signs in **once** with the OAuth 2.0 **device-code flow**: the service returns a
-short code and a URL, the student opens the URL on Microsoft's real sign-in page (so push,
-number-matching and passkeys all work) and enters the code. No password ever reaches this
-service. The result is a FOCI family refresh token that the **caller stores** and sends back
-on each read; the broker rotates it and the service hands the new one back in the
+The student signs in **once**, always on Microsoft's real sign-in page (so push,
+number-matching and passkeys all work). No password ever reaches this service. Two flows:
+
+- **Browser sign-in** (what the Schuly Microsoft plugin uses): an OAuth 2.0
+  authorization-code + PKCE flow. `browser/start` returns the authorize URL and a
+  `code_verifier`; the app opens the URL in a WebView, captures the `?code=` from the
+  redirect to Microsoft's native-client URL, and sends it back with the verifier to
+  `browser/complete`. Works on tenants that block the device-code flow.
+- **Device-code flow**: the service returns a short code and a URL, the student opens the
+  URL and enters the code, and the caller polls until it completes.
+
+Either way the result is a FOCI family refresh token that the **caller stores** and sends
+back on each read; the broker rotates it and the service hands the new one back in the
 `X-MS-Refresh-Token` header. **The service stores nothing.**
 
 ```
+POST /api/auth/browser/start         → { authorize_url, redirect_uri, code_verifier }
+POST /api/auth/browser/complete      { code, code_verifier } → complete (+ refresh_token, account) | error
 POST /api/auth/device/start          → { user_code, verification_uri, device_code, ... }
 POST /api/auth/device/poll           { device_code } → pending | complete (+ refresh_token, account)
 GET  /api/me                         header X-MS-Refresh-Token
-GET  /api/mail?folder=&top=&unread=  "
-GET  /api/calendar?top=              "
+GET  /api/mail?folder=&top=&unread=&search=  "
+GET  /api/calendar?top=&start=&end=  "
 GET  /api/files?path=&top=           "
 GET  /api/chats?top=                 "
 GET  /api/notebooks                  "
