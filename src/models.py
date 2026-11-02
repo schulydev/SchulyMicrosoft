@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints
 
 
 class DeviceStartResponse(BaseModel):
@@ -126,3 +126,16 @@ class OneNotePageUpdate(BaseModel):
     title: str | None = Field(None, min_length=1, max_length=255)
     outlines: list[OneNoteOutlineUpdate] | None = Field(None, max_length=50)
     append: str | None = Field(None, description="Rich text appended to the page as a new text box.")
+
+
+class FilesSearchRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    q: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    start: int = Field(0, ge=0, le=5000, alias="from")
+    size: int = Field(25, ge=1, le=50)
+    teamId: str | None = Field(None, max_length=36)
+
+
+class SearchRequest(FilesSearchRequest):
+    types: list[Literal["files", "mail", "chats", "channels"]] = Field(["files", "mail", "chats", "channels"], min_length=1, max_length=4)

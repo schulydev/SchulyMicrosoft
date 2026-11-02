@@ -95,6 +95,21 @@ GET  /api/files/{itemId}/pdf                                      Office file as
 GET  /api/chats/{id}/messages/{mid}/files/{fid}/pdf               "  (chat file, converted where it lives)
 GET  /api/mail/{id}/attachments/{aid}/pdf                         "  (<= 25 MB, via a temporary app-folder file)
 POST /api/convert/pdf?name=                                       raw bytes (<= 105 MB) → PDF, via a temporary app-folder file
+GET  /api/teams                                                    joined teams [{id, displayName, description}] (10 min cache)
+GET  /api/teams/{teamId}/channels                                 [{id, displayName, membershipType, description}]
+GET  /api/teams/{teamId}/files?channel_id=&path=&top=             {driveId, folder: {id, name, path}, items[]} (team library or channel folder)
+GET  /api/teams/{teamId}/channels/{channelId}/messages?top=       channel posts, newest first (1-200)
+GET  /api/teams/{teamId}/channels/{channelId}/messages/{mid}/replies?top=   replies, oldest first
+GET  /api/drives/{driveId}/items/{itemId}                         one driveItem (fresh download URL)
+GET  /api/drives/{driveId}/items/{itemId}/children?top=           driveItems
+GET  /api/drives/{driveId}/items/{itemId}/content                 file bytes (attachment, <= 100 MB, no-store)
+GET  /api/drives/{driveId}/items/{itemId}/pdf | /thumbnail?size=  as the /api/files/{id} routes
+GET  /api/drives/{driveId}/items/{itemId}/text?offset=&max_chars=&sheet=&row_offset=&max_rows=   FileText (docx, xlsx, pptx, pdf, text; legacy via PDF)
+GET  /api/files/{itemId}/text?...                                 FileText of an own OneDrive item
+POST /api/convert/text?name=&...                                  raw bytes (<= 25 MB) -> FileText
+GET  /api/files/shared?top= | /api/files/recent?top=              flattened driveItems (parentReference.driveId always set)
+POST /api/files/search                                            { q, from?, size?, teamId? } -> SearchResult (files)
+POST /api/search                                                  { q, types?[files|mail|chats|channels], from?, size?, teamId? } -> SearchResult
 GET  /api/emojis/catalogue?locale=  Teams emoji catalogue (no token, cached 24 h)
 GET  /api/emojis/custom/{documentId}?animated=  tenant custom emoji image (message emojis[].documentId)
 ```

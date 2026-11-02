@@ -62,6 +62,10 @@ src/
   emojis.py             # Teams emoji catalogue (public CDN, 24 h cache), message emoji parsing, send allowlist
   file_thumbs.py        # file kinds, SharePoint/OneDrive host check, chat file and drive thumbnails
   file_pdf.py           # Office files as PDF (Graph format=pdf); temp app-folder upload + delete + hourly sweep, converted-host allowlist
+  teams_files.py        # joined teams, channels, team/channel library browsing (drive id via C_SITES), drive items, shared/recent files, download host check
+  search.py             # Search API (files / mail / chats / channel posts) with hit locations, per-drive fallback, per-source errors; never logs the query
+  file_text.py          # text out of docx/xlsx/pptx/pdf/text (lazy imports, zip-bomb guard, caps, paging)
+  channel_messages.py   # Teams channel posts and replies, normalized (html to text)
   gifs.py               # Giphy search (needs GIPHY_API_KEY; 503 without)
   onenote.py            # OneNote over Graph: notebooks (own + teams), section tree, pages, search, writes, resource stream
   onenote_html.py       # OneNote page HTML allowlist sanitizer (read and write), text-box editability, InkML to SVG
