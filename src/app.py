@@ -31,8 +31,8 @@ from starlette.datastructures import UploadFile
 import entrance
 from outnote import GraphError
 
-from src import password_signin, browser_auth, chat_html, chat_read, chat_send, config, emojis, file_pdf, file_thumbs, folder_roles, gifs, onenote, onenote_html, outnote_client, people_photos, profile, teams_chat
-from src.models import PasswordMethodRequest, PasswordOtpRequest, PasswordSignInResponse, PasswordStartRequest, BrowserCompleteRequest, BrowserStartResponse, DevicePollRequest, DevicePollResponse, DeviceStartResponse, LinkedIdentity, MailFlagRequest, MailForwardRequest, MailMessageIn, MailMoveRequest, MailReadRequest, MailReplyRequest, MeetingRequest, OneNotePageCreate, OneNotePageUpdate
+from src import password_signin, browser_auth, channel_messages, chat_html, chat_read, chat_send, config, emojis, file_pdf, file_text, file_thumbs, folder_roles, gifs, onenote, onenote_html, outnote_client, people_photos, profile, search, teams_chat, teams_files
+from src.models import FilesSearchRequest, SearchRequest, PasswordMethodRequest, PasswordOtpRequest, PasswordSignInResponse, PasswordStartRequest, BrowserCompleteRequest, BrowserStartResponse, DevicePollRequest, DevicePollResponse, DeviceStartResponse, LinkedIdentity, MailFlagRequest, MailForwardRequest, MailMessageIn, MailMoveRequest, MailReadRequest, MailReplyRequest, MeetingRequest, OneNotePageCreate, OneNotePageUpdate
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -96,6 +96,11 @@ MESSAGE_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
 ATTACHMENT_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,100}")
 DOCUMENT_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,120}")
 DRIVE_ITEM_PATTERN = re.compile(r"[A-Za-z0-9!=_\-+.]{1,512}")
+TEAM_ID_PATTERN = re.compile(r"[0-9a-fA-F-]{36}")
+CHANNEL_ID_PATTERN = re.compile(r"19:[A-Za-z0-9_-]{1,200}@thread\.(tacv2|skype)")
+DRIVE_ID_PATTERN = re.compile(r"[A-Za-z0-9!_-]{1,200}")
+CHANNEL_MESSAGE_ID_PATTERN = re.compile(r"[0-9]{1,20}")
+MAX_TEXT_SOURCE_BYTES = 25 * 1024 * 1024
 MAX_CHAT_FILE_BYTES = 100 * 1024 * 1024
 MAX_SEND_BYTES = 105 * 1024 * 1024  # a whole chat send: one 100 MB file plus the message and inline images
 MAX_JSON_SEND_BYTES = 256 * 1024
@@ -118,6 +123,9 @@ async def _validation_error(request: Request, exc: RequestValidationError):
     if request.url.path.startswith("/api/auth/password"):
         details = [{"loc": list(e.get("loc", ())), "msg": e.get("msg"), "type": e.get("type")} for e in exc.errors()]
         return JSONResponse(status_code=422, content={"status": "error", "code": "invalid_request", "message": "The request is invalid.", "detail": details})
+    if request.url.path in ("/api/search", "/api/files/search"):
+        # The rejected input would be the search query.
+        return JSONResponse(status_code=422, content={"detail": [{"loc": list(e.get("loc", ())), "msg": e.get("msg"), "type": e.get("type")} for e in exc.errors()]})
     return await request_validation_exception_handler(request, exc)
 
 
@@ -672,6 +680,15 @@ async def drive_thumbnail(item_id: str, token: str = Header(..., alias=config.RE
     return await _thumbnail(token, lambda note, broker: file_thumbs.drive_item_thumbnail(note, item_id, size))
 
 
+@app.get("/api/drives/{drive_id}/items/{item_id}/thumbnail", tags=["Teams files"], response_class=Response, responses={200: {"content": {"image/jpeg": {}}}})
+async def shared_drive_thumbnail(drive_id: str, item_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), size: str = Query("medium")):
+    """The preview image of an item in any drive the user can read (a team library, a shared drive); 404 when it has none."""
+    _check_id(drive_id, DRIVE_ID_PATTERN, "drive_id")
+    _check_id(item_id, DRIVE_ITEM_PATTERN, "item_id")
+    _check_thumbnail_size(size)
+    return await _thumbnail(token, lambda note, broker: file_thumbs.drive_item_thumbnail(note, item_id, size, drive_id))
+
+
 def _check_thumbnail_size(size: str):
     if size not in file_thumbs.SIZES:
         raise HTTPException(status_code=400, detail=f"size must be one of {', '.join(file_thumbs.SIZES)}")
@@ -788,6 +805,240 @@ async def _pdf(token: str, convert):
             spooled.close()
 
     return StreamingResponse(body(), media_type="application/pdf", headers=headers)
+
+
+# --- Teams files, shared / recent files, search, channel messages, file text ---------------------------------------
+async def _private_read(response: Response, token: str, action: Callable[..., object], with_broker: bool = False):
+    # The rotated refresh token may ride on this response, so nothing may store it.
+    response.headers["Cache-Control"] = "no-store"
+    return await _read(response, token, action, with_broker=with_broker)
+
+
+def _check_path(path: str | None) -> str | None:
+    try:
+        teams_files.valid_path(path)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid path.")
+    return path
+
+
+@app.get("/api/teams", tags=["Teams files"])
+async def joined_teams(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    """The joined teams `[{id, displayName, description}]`, cached 10 minutes per account."""
+    return await _private_read(response, token, teams_files.joined_teams, with_broker=True)
+
+
+@app.get("/api/teams/{team_id}/channels", tags=["Teams files"])
+async def team_channels(team_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    _check_id(team_id, TEAM_ID_PATTERN, "team_id")
+    return await _private_read(response, token, lambda note, broker: teams_files.channels(note, broker, team_id), with_broker=True)
+
+
+@app.get("/api/teams/{team_id}/files", tags=["Teams files"])
+async def team_files(team_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), channel_id: str | None = Query(None), path: str | None = Query(None, max_length=teams_files.MAX_PATH_CHARS), top: int = Query(100, ge=1, le=1000)):
+    """`{driveId, folder: {id, name, path}, items}`: the team library root, a channel's folder (`channel_id`) or a sub-folder (`path`, folder names under that folder)."""
+    _check_id(team_id, TEAM_ID_PATTERN, "team_id")
+    if channel_id:
+        _check_id(channel_id, CHANNEL_ID_PATTERN, "channel_id")
+    _check_path(path)
+    return await _private_read(response, token, lambda note, broker: teams_files.team_files(note, broker, team_id, channel_id or None, path, top), with_broker=True)
+
+
+@app.get("/api/teams/{team_id}/channels/{channel_id}/messages", tags=["Teams files"])
+async def channel_message_list(team_id: str, channel_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), top: int = Query(30, ge=1, le=200)):
+    _check_id(team_id, TEAM_ID_PATTERN, "team_id")
+    _check_id(channel_id, CHANNEL_ID_PATTERN, "channel_id")
+    return await _private_read(response, token, lambda note: channel_messages.messages(note, team_id, channel_id, top))
+
+
+@app.get("/api/teams/{team_id}/channels/{channel_id}/messages/{message_id}/replies", tags=["Teams files"])
+async def channel_message_replies(team_id: str, channel_id: str, message_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), top: int = Query(50, ge=1, le=200)):
+    _check_id(team_id, TEAM_ID_PATTERN, "team_id")
+    _check_id(channel_id, CHANNEL_ID_PATTERN, "channel_id")
+    _check_id(message_id, CHANNEL_MESSAGE_ID_PATTERN, "message_id")
+    return await _private_read(response, token, lambda note: channel_messages.replies(note, team_id, channel_id, message_id, top))
+
+
+@app.get("/api/drives/{drive_id}/items/{item_id}", tags=["Teams files"])
+async def drive_item(drive_id: str, item_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    """One driveItem with a fresh download URL."""
+    _check_id(drive_id, DRIVE_ID_PATTERN, "drive_id")
+    _check_id(item_id, DRIVE_ITEM_PATTERN, "item_id")
+    return await _private_read(response, token, lambda note: teams_files.drive_item(note, drive_id, item_id))
+
+
+@app.get("/api/drives/{drive_id}/items/{item_id}/children", tags=["Teams files"])
+async def drive_item_children(drive_id: str, item_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), top: int = Query(100, ge=1, le=1000)):
+    _check_id(drive_id, DRIVE_ID_PATTERN, "drive_id")
+    _check_id(item_id, DRIVE_ITEM_PATTERN, "item_id")
+    return await _private_read(response, token, lambda note: teams_files.children(note, drive_id, item_id, top))
+
+
+@app.get("/api/drives/{drive_id}/items/{item_id}/content", tags=["Teams files"], response_class=StreamingResponse, responses={200: {"content": {"application/octet-stream": {}}}})
+async def drive_item_content(drive_id: str, item_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    """The file's bytes as an attachment (<= 100 MB, no-store)."""
+    _check_id(drive_id, DRIVE_ID_PATTERN, "drive_id")
+    _check_id(item_id, DRIVE_ITEM_PATTERN, "item_id")
+
+    def resolve(note):
+        item = note.get(teams_files.item_base(drive_id, item_id), {"$select": "id,name,size,file,@microsoft.graph.downloadUrl"})
+        if not isinstance(item, dict) or item.get("file") is None:
+            raise HTTPException(status_code=404, detail="File not found.")
+        if (item.get("size") or 0) > teams_files.MAX_DOWNLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="The file is larger than 100 MB.")
+        url = item.get("@microsoft.graph.downloadUrl")
+        if not url:
+            raise HTTPException(status_code=404, detail="The file has no download link.")
+        if not teams_files.is_download_url(url):
+            raise HTTPException(status_code=502, detail="The file has an unexpected download location.")
+        return item, url
+
+    carrier = Response()
+    item, url = await _read(carrier, token, resolve)
+    headers = _token_headers(carrier)
+    headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(_safe_name(item.get('name')), safe='')}"
+    headers["Cache-Control"] = "no-store"
+    headers["X-Content-Type-Options"] = "nosniff"
+    headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
+    return StreamingResponse(outnote_client.stream_download(url, teams_files.MAX_DOWNLOAD_BYTES, follow_redirects=False), media_type=_safe_content_type((item.get("file") or {}).get("mimeType")), headers=headers)
+
+
+@app.get("/api/drives/{drive_id}/items/{item_id}/pdf", tags=["Files as PDF"], response_class=StreamingResponse, responses={200: {"content": {"application/pdf": {}}}})
+async def shared_drive_item_pdf(drive_id: str, item_id: str, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    """An item of any readable drive converted to PDF by Microsoft 365. 415 when the type can't be converted."""
+    _check_id(drive_id, DRIVE_ID_PATTERN, "drive_id")
+    _check_id(item_id, DRIVE_ITEM_PATTERN, "item_id")
+
+    def convert(note, broker):
+        item = note.get(teams_files.item_base(drive_id, item_id), {"$select": "id,name,size,file"})
+        _check_source(item)
+        return item.get("name"), _converted(lambda: file_pdf.drive_item_pdf(note, item_id, drive_id))
+
+    return await _pdf(token, convert)
+
+
+def _file_text(note, drive_id: str | None, item_id: str, offset: int, max_chars: int, sheet: str | None, row_offset: int, max_rows: int) -> dict:
+    item = note.get(teams_files.item_base(drive_id, item_id), {"$select": "id,name,size,file,@microsoft.graph.downloadUrl"})
+    if not isinstance(item, dict) or item.get("file") is None:
+        raise HTTPException(status_code=404, detail="File not found.")
+    name = item.get("name") or ""
+    kind = file_text.kind_of(name)
+    if kind is None:
+        raise HTTPException(status_code=415, detail=file_text.UNSUPPORTED)
+    if (item.get("size") or 0) > file_text.MAX_SOURCE_BYTES and kind != "legacy":
+        raise HTTPException(status_code=413, detail="The file is larger than 25 MB.")
+    notes = []
+    try:
+        if kind == "legacy":
+            spooled = _converted(lambda: file_pdf.drive_item_pdf(note, item_id, drive_id))
+            try:
+                data = spooled.read(file_text.MAX_SOURCE_BYTES + 1)
+            finally:
+                spooled.close()
+            name = posixpath.splitext(name)[0] + ".pdf"
+            notes.append("Converted to PDF by Microsoft 365 before reading.")
+        else:
+            url = item.get("@microsoft.graph.downloadUrl")
+            if not url:
+                raise HTTPException(status_code=404, detail="The file has no download link.")
+            data = teams_files.fetch_bytes(url, file_text.MAX_SOURCE_BYTES)
+        result = file_text.extract(name, data, offset, max_chars, sheet, row_offset, max_rows, notes)
+    except file_text.TextError as ex:
+        raise HTTPException(status_code=ex.status, detail=str(ex))
+    except teams_files.FileFetchError as ex:
+        raise HTTPException(status_code=ex.status, detail=str(ex))
+    result["name"] = item.get("name") or result["name"]
+    return result
+
+
+_TEXT_OFFSET = Query(0, ge=0, le=100_000_000)
+_TEXT_CHARS = Query(file_text.DEFAULT_CHARS, ge=1, le=file_text.MAX_CHARS)
+_TEXT_SHEET = Query(None, max_length=64)
+_TEXT_ROW_OFFSET = Query(0, ge=0, le=file_text.MAX_ROW_OFFSET)
+_TEXT_ROWS = Query(file_text.DEFAULT_ROWS, ge=1, le=file_text.MAX_ROWS)
+
+
+@app.get("/api/drives/{drive_id}/items/{item_id}/text", tags=["File text"])
+async def shared_drive_item_text(drive_id: str, item_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), offset: int = _TEXT_OFFSET, max_chars: int = _TEXT_CHARS, sheet: str | None = _TEXT_SHEET, row_offset: int = _TEXT_ROW_OFFSET, max_rows: int = _TEXT_ROWS):
+    """Plain text of a document, spreadsheet, presentation, PDF or text file (FileText), paged by characters (and rows for a sheet)."""
+    _check_id(drive_id, DRIVE_ID_PATTERN, "drive_id")
+    _check_id(item_id, DRIVE_ITEM_PATTERN, "item_id")
+    return await _private_read(response, token, lambda note: _file_text(note, drive_id, item_id, offset, max_chars, sheet, row_offset, max_rows))
+
+
+@app.get("/api/files/{item_id}/text", tags=["File text"])
+async def drive_item_text(item_id: str, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), offset: int = _TEXT_OFFSET, max_chars: int = _TEXT_CHARS, sheet: str | None = _TEXT_SHEET, row_offset: int = _TEXT_ROW_OFFSET, max_rows: int = _TEXT_ROWS):
+    """FileText of an item in the user's own OneDrive."""
+    _check_id(item_id, DRIVE_ITEM_PATTERN, "item_id")
+    return await _private_read(response, token, lambda note: _file_text(note, None, item_id, offset, max_chars, sheet, row_offset, max_rows))
+
+
+@app.post("/api/convert/text", tags=["File text"])
+async def convert_text(request: Request, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), name: str = Query(..., min_length=1, max_length=255), offset: int = _TEXT_OFFSET, max_chars: int = _TEXT_CHARS, sheet: str | None = _TEXT_SHEET, row_offset: int = _TEXT_ROW_OFFSET, max_rows: int = _TEXT_ROWS):
+    """FileText of the request body (raw bytes, up to 25 MB); `name`'s extension picks the type. For files that aren't in a drive."""
+    _check_token(token)
+    safe = _safe_name(name)
+    if file_text.kind_of(safe) is None:
+        raise HTTPException(status_code=415, detail=file_text.UNSUPPORTED)
+    declared = request.headers.get("content-length")
+    if declared is not None and (not declared.isdigit() or int(declared) > MAX_TEXT_SOURCE_BYTES):
+        raise HTTPException(status_code=413, detail="The file is larger than 25 MB.")
+    body = bytearray()
+    async for chunk in _limited(request, MAX_TEXT_SOURCE_BYTES).stream():
+        body.extend(chunk)
+    if not body:
+        raise HTTPException(status_code=400, detail="The body is empty.")
+    data = bytes(body)
+    del body
+
+    def run(note, broker):
+        notes = []
+        try:
+            if file_text.kind_of(safe) == "legacy":
+                spooled = _converted(lambda: file_pdf.bytes_pdf(note, broker, data, safe))
+                try:
+                    pdf = spooled.read(file_text.MAX_SOURCE_BYTES + 1)
+                finally:
+                    spooled.close()
+                notes.append("Converted to PDF by Microsoft 365 before reading.")
+                result = file_text.extract(posixpath.splitext(safe)[0] + ".pdf", pdf, offset, max_chars, sheet, row_offset, max_rows, notes)
+                result["name"] = safe
+                return result
+            return file_text.extract(safe, data, offset, max_chars, sheet, row_offset, max_rows, notes)
+        except file_text.TextError as ex:
+            raise HTTPException(status_code=ex.status, detail=str(ex))
+
+    return await _private_read(response, token, run, with_broker=True)
+
+
+@app.get("/api/files/shared", tags=["Teams files"])
+async def files_shared(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), top: int = Query(50, ge=1, le=200)):
+    """Files shared with the user, flattened from `remoteItem`, each with `parentReference.driveId` and `shared: {sharedBy, sharedDateTime}`."""
+    return await _private_read(response, token, lambda note: teams_files.shared_with_me(note, top))
+
+
+@app.get("/api/files/recent", tags=["Teams files"])
+async def files_recent(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER), top: int = Query(50, ge=1, le=200)):
+    return await _private_read(response, token, lambda note: teams_files.recent(note, top))
+
+
+def _check_team(team_id: str | None):
+    if team_id is not None:
+        _check_id(team_id, TEAM_ID_PATTERN, "teamId")
+
+
+@app.post("/api/files/search", tags=["Search"])
+async def files_search(body: FilesSearchRequest, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    """SearchResult with file hits only. With `teamId` that team's library is searched. The query never reaches a log."""
+    _check_team(body.teamId)
+    return await _private_read(response, token, lambda note, broker: search.run(note, broker, body.q, ["files"], body.start, body.size, body.teamId), with_broker=True)
+
+
+@app.post("/api/search", tags=["Search"])
+async def search_all(body: SearchRequest, response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
+    """SearchResult over files, mail, chats and channel posts (`types`), each hit with the place it lives in."""
+    _check_team(body.teamId)
+    return await _private_read(response, token, lambda note, broker: search.run(note, broker, body.q, body.types, body.start, body.size, body.teamId), with_broker=True)
 
 
 @app.get("/api/emojis/catalogue", tags=["Emojis"])

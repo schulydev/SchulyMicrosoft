@@ -165,9 +165,9 @@ async def _post(url: str, data: dict, client: httpx.AsyncClient | None) -> dict:
         log.debug("POST %s took %.0f ms", url, (time.perf_counter() - started) * 1000)
 
 
-def stream_download(url: str, limit: int):
+def stream_download(url: str, limit: int, follow_redirects: bool = True):
     """Yields a pre-authorized download URL's bytes in chunks (no bearer token is sent), stopping past `limit` bytes."""
-    with entrance.http_client().stream("GET", url, timeout=httpx.Timeout(60.0, connect=5.0), follow_redirects=True) as r:
+    with entrance.http_client().stream("GET", url, timeout=httpx.Timeout(60.0, connect=5.0), follow_redirects=follow_redirects) as r:
         r.raise_for_status()
         sent = 0
         for chunk in r.iter_bytes(64 * 1024):

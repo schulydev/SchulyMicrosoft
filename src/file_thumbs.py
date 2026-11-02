@@ -144,7 +144,9 @@ def chat_file_thumbnail(note, broker, url: str, size: str) -> bytes | None:
     return _content(note, f"drives/{quote(ids[0], safe='')}/items/{quote(ids[1], safe='')}/thumbnails/0/{size}/content")
 
 
-def drive_item_thumbnail(note, item_id: str, size: str) -> bytes | None:
-    if size not in SIZES or not safe_graph_id(item_id):
+def drive_item_thumbnail(note, item_id: str, size: str, drive_id: str | None = None) -> bytes | None:
+    """The thumbnail of an item in the user's OneDrive, or of `drive_id`'s item (a team library, a shared drive)."""
+    if size not in SIZES or not safe_graph_id(item_id) or (drive_id is not None and not safe_graph_id(drive_id)):
         return None
-    return _content(note, f"me/drive/items/{quote(item_id, safe='')}/thumbnails/0/{size}/content")
+    base = f"drives/{quote(drive_id, safe='')}/items" if drive_id else "me/drive/items"
+    return _content(note, f"{base}/{quote(item_id, safe='')}/thumbnails/0/{size}/content")
