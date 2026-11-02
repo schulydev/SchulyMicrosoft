@@ -1329,9 +1329,9 @@ async def user_photo(user_id: str, token: str = Header(..., alias=config.REFRESH
 
 async def _identity(refresh_token: str) -> LinkedIdentity:
     try:
-        note, _ = outnote_client.build_client(refresh_token)
-        profile = await asyncio.to_thread(note.me)
-        return LinkedIdentity(id=profile.get("id"), email=profile.get("mail") or profile.get("userPrincipalName"), name=profile.get("displayName"))
+        note, broker = outnote_client.build_client(refresh_token)
+        me = await asyncio.to_thread(profile.get, note, broker)
+        return LinkedIdentity(id=me.get("id"), email=me.get("mail") or me.get("userPrincipalName"), name=me.get("displayName"))
     except Exception:
         return LinkedIdentity()
 
