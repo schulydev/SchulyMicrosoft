@@ -55,7 +55,7 @@ POST /api/auth/password/{id}/method  { method: push|otp } → push_pending { num
 POST /api/auth/password/{id}/otp     { code } → complete | otp_invalid { attempts_left } | error
 GET  /api/auth/password/{id}         → current status (push_pending | complete | denied | timed_out | error | ...)
 DELETE /api/auth/password/{id}       → 204 (cancel)
-GET  /api/me                         header X-MS-Refresh-Token  (profile cached 1 h per account)
+GET  /api/me                         header X-MS-Refresh-Token  (profile cached 1 h per account; from the token claims while /me is throttled)
 GET  /health/live                    → 200 { status: ok }
 GET  /health/ready                   → 503 { status: starting } until warm-up is done (max 15 s), then 200 { status: ready }
 GET  /api/mail?folder=&top=&skip=&unread=&search=  "  (skip pages, not with search; folder: well-known name or folder id)

@@ -30,7 +30,7 @@ The Schuly **Microsoft plugin** is the only caller.
 
 - `src/__init__.py` hides `h2` so the shared httpx clients use HTTP/1.1 (httpcore's sync HTTP/2
   connection races on stream ids under concurrent first requests); `MS_HTTP2=1` opts back in.
-- Read `/me` only through `profile.get` (Graph 429s it with ~21 s Retry-After, which OutNote sleeps in the worker).
+- Read `/me` only through `profile.get`: it asks `/me` once without OutNote's retries (Graph 429s it with ~21 s Retry-After) and falls back to the access token's claims (oid, name, upn).
 - `GET /health/live` is always 200; `GET /health/ready` is 503 until the startup warm-up finished or 15 s passed
   (the Dockerfile `HEALTHCHECK` uses it).
 
@@ -52,7 +52,7 @@ src/
   outnote_client.py     # thin OutNote/Entrance wrapper (device start/poll, build_client)
   models.py             # pydantic DTOs
   account_cache.py      # per-account TTL cache living on the shared broker
-  profile.py            # the user's /me profile, cached 1 h per account (Graph throttles /me hard)
+  profile.py            # the user's /me profile: one try, token claims on 429; cached 1 h (claims 5 min)
   folder_roles.py       # well-known mail folder names via one $batch
   teams_chat.py         # group chat pictures over the Teams chat service (skype token, AMS)
   chat_read.py          # chat messages + media/files/cards for the web

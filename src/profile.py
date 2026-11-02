@@ -1,13 +1,31 @@
-"""The signed-in user's own profile (`GET /me`), cached per account.
+"""The signed-in user's own profile (`GET /me`), cached per account, never stalled by throttling.
 
-Graph throttles `/me` (a directory read) with long Retry-After waits that OutNote sleeps in the
-worker thread, so the profile is read at most once per account per hour.
+Graph throttles `/me` (a directory read) on its own, with 429 and Retry-After ~21 s, even when every
+other route answers at once. OutNote sleeps each Retry-After in the worker thread and retries up to
+4 times, which made the first `/api/me` after a start take 42 s (two 21 s waits). So `/me` is asked
+exactly once, without OutNote's retries; on 429 (or any failure) the profile comes from the claims of
+the access token the broker just minted (oid, name, upn), which Microsoft signed for this user. A
+`/me` answer is kept for an hour, a profile from claims for five minutes, so `/me` is tried again later.
 """
+
+import base64
+import binascii
+import json
+import logging
+
+import httpx
+from entrance import http_client
+from outnote import C_OFFICE, GraphError
 
 from src.account_cache import for_broker
 
+log = logging.getLogger("schuly.microsoft")
+
 CACHE_KEY = "me_profile"
 TTL = 3600.0
+CLAIMS_TTL = 300.0
+ME_URL = "https://graph.microsoft.com/v1.0/me"
+ME_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 
 
 def get(note, broker) -> dict:
@@ -18,6 +36,43 @@ def get(note, broker) -> dict:
     with cache.lock(CACHE_KEY):
         hit = cache.get(CACHE_KEY)
         if hit is None:
-            hit = note.me()
-            cache.set(CACHE_KEY, hit, TTL)
+            hit, ttl = _fetch(note, broker)
+            cache.set(CACHE_KEY, hit, ttl)
         return hit
+
+
+def _fetch(note, broker) -> tuple[dict, float]:
+    token = broker(C_OFFICE)
+    status = None
+    try:
+        r = http_client().get(ME_URL, headers={"Authorization": f"Bearer {token}"}, timeout=ME_TIMEOUT)
+        status = r.status_code
+        if status == 200:
+            return r.json(), TTL
+        log.info("/me answered %s (Retry-After %s); using the token's claims", status, r.headers.get("Retry-After"))
+    except (httpx.HTTPError, ValueError) as ex:
+        log.info("/me failed (%s); using the token's claims", type(ex).__name__)
+    claims = from_claims(token)
+    if claims is None:
+        raise GraphError(status or 502, "The profile is unavailable.")
+    return claims, CLAIMS_TTL
+
+
+def from_claims(access_token: str) -> dict | None:
+    """A `/me`-shaped profile from the access token's claims, or None when it carries no user object id."""
+    try:
+        payload = access_token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (IndexError, ValueError, binascii.Error):
+        return None
+    if not isinstance(claims, dict) or not isinstance(claims.get("oid"), str):
+        return None
+    upn = claims.get("upn") or claims.get("unique_name") or claims.get("preferred_username")
+    return {
+        "id": claims["oid"],
+        "displayName": claims.get("name"),
+        "givenName": claims.get("given_name"),
+        "surname": claims.get("family_name"),
+        "userPrincipalName": upn,
+        "mail": claims.get("email") or upn,
+    }
