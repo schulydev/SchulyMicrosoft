@@ -32,6 +32,9 @@ class Note:
         self.messages = []
         self.members = [{"userId": "me-id", "email": "me@school.ch"}, {"userId": "u2", "email": "bo@school.ch", "displayName": "Bo"}]
 
+    def me(self):
+        return self.get("me")
+
     def mail_folders(self, include_children=False):
         return [{"id": "F-IN", "displayName": "Posteingang", "parentFolderId": "ROOT"}, {"id": "F-SUB", "displayName": "Kurs", "parentFolderId": "F-IN"}, {"id": "F-RSS", "displayName": "RSS-Feeds", "parentFolderId": "ROOT"}]
 

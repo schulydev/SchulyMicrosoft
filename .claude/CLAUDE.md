@@ -26,6 +26,14 @@ The Schuly **Microsoft plugin** is the only caller.
   chat pictures (`teams_chat.py`): a Teams-client token for `api.spaces.skype.com` is traded at
   `teams.microsoft.com/api/authsvc/v1.0/authz` for a skype token.
 
+## Cold start
+
+- `src/__init__.py` hides `h2` so the shared httpx clients use HTTP/1.1 (httpcore's sync HTTP/2
+  connection races on stream ids under concurrent first requests); `MS_HTTP2=1` opts back in.
+- Read `/me` only through `profile.get` (Graph 429s it with ~21 s Retry-After, which OutNote sleeps in the worker).
+- `GET /health/live` is always 200; `GET /health/ready` is 503 until the startup warm-up finished or 15 s passed
+  (the Dockerfile `HEALTHCHECK` uses it).
+
 ## Code formatting
 
 **Declaration signatures go on one line** — don't wrap a function/method parameter list
@@ -44,6 +52,7 @@ src/
   outnote_client.py     # thin OutNote/Entrance wrapper (device start/poll, build_client)
   models.py             # pydantic DTOs
   account_cache.py      # per-account TTL cache living on the shared broker
+  profile.py            # the user's /me profile, cached 1 h per account (Graph throttles /me hard)
   folder_roles.py       # well-known mail folder names via one $batch
   teams_chat.py         # group chat pictures over the Teams chat service (skype token, AMS)
   chat_read.py          # chat messages + media/files/cards for the web

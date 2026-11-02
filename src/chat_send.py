@@ -15,7 +15,7 @@ from urllib.parse import quote
 
 from entrance import http_client
 
-from src import chat_html, emojis
+from src import chat_html, emojis, profile
 
 MAX_CONTENT_CHARS = 28000  # Graph's chat message body limit is about 28 KB
 MAX_IMAGES_BYTES = 3 * 1024 * 1024  # about 4 MB once base64-encoded, Graph's request limit
@@ -192,10 +192,10 @@ def upload_file(note, upload: Upload) -> dict:
     return item
 
 
-def chat_member_ids(note, chat_id: str) -> list[str]:
+def chat_member_ids(note, broker, chat_id: str) -> list[str]:
     if chat_id == SELF_CHAT:
         return []
-    me = note.get("me", {"$select": "id"}).get("id")
+    me = profile.get(note, broker).get("id")
     ids = []
     for m in note.list(f"chats/{chat_id}/members"):
         uid = m.get("userId")
@@ -217,10 +217,10 @@ def reference_attachment(item: dict) -> dict:
     return {"id": m.group(1).lower(), "contentType": "reference", "contentUrl": item["webUrl"], "name": item.get("name")}
 
 
-def send(note, chat_id: str, msg: OutgoingMessage) -> dict:
+def send(note, broker, chat_id: str, msg: OutgoingMessage) -> dict:
     attachments = []
     if msg.files:
-        members = chat_member_ids(note, chat_id)
+        members = chat_member_ids(note, broker, chat_id)
         for upload in msg.files:
             item = upload_file(note, upload)
             share_with(note, item["id"], members)

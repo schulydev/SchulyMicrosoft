@@ -15,6 +15,7 @@ import json
 import logging
 import posixpath
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import timezone
@@ -30,13 +31,14 @@ from starlette.datastructures import UploadFile
 import entrance
 from outnote import GraphError
 
-from src import password_signin, browser_auth, chat_html, chat_read, chat_send, config, emojis, file_pdf, file_thumbs, folder_roles, gifs, onenote, onenote_html, outnote_client, people_photos, teams_chat
+from src import password_signin, browser_auth, chat_html, chat_read, chat_send, config, emojis, file_pdf, file_thumbs, folder_roles, gifs, onenote, onenote_html, outnote_client, people_photos, profile, teams_chat
 from src.models import PasswordMethodRequest, PasswordOtpRequest, PasswordSignInResponse, PasswordStartRequest, BrowserCompleteRequest, BrowserStartResponse, DevicePollRequest, DevicePollResponse, DeviceStartResponse, LinkedIdentity, MailFlagRequest, MailForwardRequest, MailMessageIn, MailMoveRequest, MailReadRequest, MailReplyRequest, MeetingRequest, OneNotePageCreate, OneNotePageUpdate
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # Pre-open the TLS connections to Microsoft in the background: the first call after a cold start otherwise pays DNS, TCP and TLS (and any dead-address timeout) itself.
-    warm = asyncio.create_task(outnote_client.warm_up())
+    _warm_state.update(started=time.monotonic(), done=False)
+    warm = asyncio.create_task(_warm_up())
     sweeper = asyncio.create_task(_sweep_sign_ins())
     yield
     warm.cancel()
@@ -47,6 +49,21 @@ async def lifespan(_: FastAPI):
 
 log = logging.getLogger("schuly.microsoft")
 
+READY_GRACE = 15.0
+_warm_state = {"started": time.monotonic(), "done": False}
+
+
+async def _warm_up():
+    started = time.monotonic()
+    try:
+        await outnote_client.warm_up()
+    except Exception as ex:
+        log.warning("Warm-up failed after %.0f ms: %s", (time.monotonic() - started) * 1000, ex)
+    else:
+        log.info("Warm-up finished in %.0f ms", (time.monotonic() - started) * 1000)
+    finally:
+        _warm_state["done"] = True
+
 
 async def _sweep_sign_ins():
     """Drop expired password sign-in jobs (and stale rate-limit windows) every few seconds."""
@@ -56,6 +73,18 @@ async def _sweep_sign_ins():
 
 
 app = FastAPI(title="SchulyMicrosoft", description="Microsoft 365 access for Schuly via OutNote.", lifespan=lifespan)
+
+@app.get("/health/live", include_in_schema=False)
+async def health_live():
+    return {"status": "ok"}
+
+
+@app.get("/health/ready", include_in_schema=False)
+async def health_ready():
+    if _warm_state["done"] or time.monotonic() - _warm_state["started"] >= READY_GRACE:
+        return {"status": "ready"}
+    return JSONResponse({"status": "starting"}, status_code=503)
+
 
 CHAT_ID_PATTERN = re.compile(r"[A-Za-z0-9:@._=-]{1,300}")
 USER_ID_PATTERN = re.compile(r"[A-Za-z0-9@._-]{1,200}")
@@ -277,7 +306,7 @@ async def password_cancel(sign_in_id: str, user_id: str = Depends(_password_call
 
 @app.get("/api/me", tags=["Microsoft 365"])
 async def me(response: Response, token: str = Header(..., alias=config.REFRESH_TOKEN_HEADER)):
-    return await _read(response, token, lambda note: note.me())
+    return await _read(response, token, profile.get, with_broker=True)
 
 
 @app.get("/api/mail", tags=["Microsoft 365"])
@@ -834,7 +863,7 @@ async def send_chat_message(chat_id: str, request: Request, response: Response, 
 
         def send(note, broker):
             try:
-                created = chat_send.send(note, chat_id, msg)
+                created = chat_send.send(note, broker, chat_id, msg)
             except chat_send.SendError as ex:
                 raise HTTPException(status_code=ex.status, detail=str(ex))
             return chat_read.enrich(note, broker, [created or {}])[0]
@@ -852,9 +881,9 @@ async def schedule_chat_meeting(chat_id: str, body: MeetingRequest, response: Re
     if body.end <= body.start:
         raise HTTPException(status_code=400, detail="end must be after start.")
 
-    def create(note):
+    def create(note, broker):
         members = [] if chat_id == chat_send.SELF_CHAT else note.list(f"chats/{chat_id}/members")
-        me = note.get("me", {"$select": "mail,userPrincipalName"})
+        me = profile.get(note, broker)
         mine = {(me.get("mail") or "").lower(), (me.get("userPrincipalName") or "").lower()}
         attendees = [{"emailAddress": {"address": m["email"], "name": m.get("displayName") or m["email"]}, "type": "required"} for m in members if m.get("email") and m["email"].lower() not in mine]
         event = {
@@ -870,7 +899,7 @@ async def schedule_chat_meeting(chat_id: str, body: MeetingRequest, response: Re
         created = note.post("me/events", event)
         return {"id": created.get("id"), "subject": created.get("subject"), "start": created.get("start"), "end": created.get("end"), "webLink": created.get("webLink"), "joinUrl": (created.get("onlineMeeting") or {}).get("joinUrl"), "attendees": [a["emailAddress"] for a in attendees]}
 
-    return await _read(response, token, create)
+    return await _read(response, token, create, with_broker=True)
 
 
 @app.get("/api/gifs/search", tags=["GIFs"])
