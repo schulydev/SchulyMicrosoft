@@ -2,9 +2,9 @@ from dataclasses import dataclass, field
 
 from mediatorx import IQuery, IQueryHandler
 
+from src.application.abstractions.i_chat_reader import IChatReader
 from src.application.abstractions.i_file_thumbnails import IFileThumbnails
 from src.application.services.account_image_reader import AccountImageReader
-from src.application.services.chat_file_lookup import ChatFileLookup
 from src.domain.files.binary_content import BinaryContent
 from src.domain.validation.graph_ids import GraphIds
 
@@ -19,9 +19,9 @@ class GetChatFileThumbnailQuery(IQuery[BinaryContent]):
 
 
 class GetChatFileThumbnailHandler(IQueryHandler[GetChatFileThumbnailQuery, BinaryContent]):
-    def __init__(self, images: AccountImageReader, lookup: ChatFileLookup, thumbnails: IFileThumbnails):
+    def __init__(self, images: AccountImageReader, reader: IChatReader, thumbnails: IFileThumbnails):
         self._images = images
-        self._lookup = lookup
+        self._reader = reader
         self._thumbnails = thumbnails
 
     async def handle(self, query: GetChatFileThumbnailQuery) -> BinaryContent:
@@ -31,7 +31,7 @@ class GetChatFileThumbnailHandler(IQueryHandler[GetChatFileThumbnailQuery, Binar
         self._images.check_thumbnail_size(query.size)
 
         def fetch(note, broker):
-            ref = self._lookup.find(note, query.chat_id, query.message_id, query.attachment_id)
+            ref = self._reader.file_ref(note, broker, query.chat_id, query.message_id, query.attachment_id)
             if ref is None or not self._thumbnails.is_share_url(ref["contentUrl"]):
                 return None
             return self._thumbnails.chat_file_thumbnail(note, broker, ref["contentUrl"], query.size)

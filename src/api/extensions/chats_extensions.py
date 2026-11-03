@@ -12,7 +12,6 @@ from src.application.queries.get_chat_hosted_content_query import GetChatHostedC
 from src.application.queries.get_chat_photo_query import GetChatPhotoQuery, GetChatPhotoHandler
 from src.application.queries.list_chat_messages_query import ListChatMessagesQuery, ListChatMessagesHandler
 from src.application.queries.list_chats_query import ListChatsQuery, ListChatsHandler
-from src.application.services.chat_file_lookup import ChatFileLookup
 from src.application.services.chat_html_sanitizer import ChatHtmlSanitizer
 from src.infrastructure.teams.chat_reader import ChatReader
 from src.infrastructure.teams.chat_sender import ChatSender
@@ -23,7 +22,6 @@ class ChatsExtensions:
     @staticmethod
     def add_chats(services: ServiceCollection) -> ServiceCollection:
         services.add_singleton(ChatHtmlSanitizer)
-        services.add_singleton(ChatFileLookup)
         services.add_singleton(ITeamsChat, TeamsChatClient)
         services.add_singleton(IChatReader, ChatReader)
         services.add_singleton(IChatSender, ChatSender)

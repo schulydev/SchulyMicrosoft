@@ -38,7 +38,7 @@ class Note:
         self.uploaded = []
         self.deleted = []
 
-    def get(self, path, params=None, raw=False):
+    def get(self, path, params=None, raw=False, retry=True):
         self.broker("x")
         self.calls.append(("get", path))
         if path.startswith("me/drive/items/"):
@@ -52,7 +52,10 @@ class Note:
             return {"id": "SPITEM", "name": "Plan.docx", "size": 4096, "file": {}, "parentReference": {"driveId": "b!DRIVE"}}
         raise GraphError(404, "missing")
 
-    def list(self, path, params=None, limit=None):
+    def chat_message(self, chat_id, message_id):
+        return self.get(f"chats/{chat_id}/messages/{message_id}")
+
+    def list(self, path, params=None, limit=None, retry=True):
         self.calls.append(("list", path))
         if path.endswith("/attachments"):
             return self.attachments

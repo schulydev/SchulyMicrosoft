@@ -3,9 +3,9 @@ from dataclasses import dataclass, field
 from mediatorx import IQuery, IQueryHandler
 
 from src.application.abstractions.i_account_runner import IAccountRunner
+from src.application.abstractions.i_chat_reader import IChatReader
 from src.application.abstractions.i_file_thumbnails import IFileThumbnails
 from src.application.abstractions.i_pdf_converter import IPdfConverter
-from src.application.services.chat_file_lookup import ChatFileLookup
 from src.application.services.drive_item_checks import DriveItemChecks
 from src.application.services.graph_paths import GraphPaths
 from src.domain.errors.service_error import ServiceError
@@ -22,9 +22,9 @@ class GetChatFilePdfQuery(IQuery[SpooledPdf]):
 
 
 class GetChatFilePdfHandler(IQueryHandler[GetChatFilePdfQuery, SpooledPdf]):
-    def __init__(self, accounts: IAccountRunner, lookup: ChatFileLookup, thumbnails: IFileThumbnails, pdf: IPdfConverter, checks: DriveItemChecks):
+    def __init__(self, accounts: IAccountRunner, reader: IChatReader, thumbnails: IFileThumbnails, pdf: IPdfConverter, checks: DriveItemChecks):
         self._accounts = accounts
-        self._lookup = lookup
+        self._reader = reader
         self._thumbnails = thumbnails
         self._pdf = pdf
         self._checks = checks
@@ -35,7 +35,7 @@ class GetChatFilePdfHandler(IQueryHandler[GetChatFilePdfQuery, SpooledPdf]):
         GraphIds.check(query.attachment_id, GraphIds.ATTACHMENT_ID_PATTERN, "attachment_id")
 
         def convert(note, broker):
-            ref = self._lookup.find(note, query.chat_id, query.message_id, query.attachment_id)
+            ref = self._reader.file_ref(note, broker, query.chat_id, query.message_id, query.attachment_id)
             if ref is None:
                 raise ServiceError(404, "File not found in the message.")
             if not self._thumbnails.is_share_url(ref.get("contentUrl")):

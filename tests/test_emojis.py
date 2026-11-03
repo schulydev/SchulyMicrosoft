@@ -290,7 +290,13 @@ class ThumbNote:
     def __init__(self):
         self.calls, self.thumb, self.file = [], JPEG, True
 
-    def get(self, path, params=None, raw=False):
+    def chat_message(self, chat_id, message_id):
+        return self.get(f"chats/{chat_id}/messages/{message_id}")
+
+    def list(self, path, params=None, limit=None, retry=True):
+        return []
+
+    def get(self, path, params=None, raw=False, retry=True):
         self.calls.append(path)
         if path.startswith("me/chats") or "/messages/" in path:
             return {"id": "m1", "attachments": [{"id": "a1", "contentType": "reference", "contentUrl": SHAREPOINT, "name": "a.docx"}, {"id": "a2", "contentType": "reference", "contentUrl": "https://evil.example/a.docx", "name": "b.docx"}]}

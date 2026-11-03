@@ -21,6 +21,7 @@ from src.application.services.account_image_reader import AccountImageReader
 from src.application.services.drive_file_text_reader import DriveFileTextReader
 from src.application.services.drive_item_checks import DriveItemChecks
 from src.infrastructure.files.file_text_extractor import FileTextExtractor
+from src.application.services.file_downloads import FileDownloads
 from src.infrastructure.graph.file_thumbnails import FileThumbnails
 from src.infrastructure.graph.pdf_converter import PdfConverter
 from src.infrastructure.graph.teams_files import TeamsFiles
@@ -34,6 +35,7 @@ class FilesExtensions:
         services.add_singleton(IFileTextExtractor, FileTextExtractor)
         services.add_singleton(ITeamsFiles, TeamsFiles)
         services.add_singleton(DriveItemChecks)
+        services.add_singleton(FileDownloads)
         services.add_singleton(DriveFileTextReader)
         services.add_singleton(AccountImageReader)
 

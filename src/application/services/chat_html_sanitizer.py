@@ -108,6 +108,12 @@ class ChatHtmlSanitizer:
     GIF_HOSTS = frozenset({"media.giphy.com", "media0.giphy.com", "media1.giphy.com", "media2.giphy.com", "media3.giphy.com", "media4.giphy.com", "i.giphy.com", "media.tenor.com", "media1.tenor.com", "c.tenor.com"})
     STICKER_HOSTS = frozenset({"stickers.newfuture.cc"})
     GIPHY_ITEMTYPE = "http://schema.skype.com/Giphy"
+    QUOTE_KINDS = {"forwardedMessageReference": "forward", "messageReference": "reply"}
+    QUOTE_SENDER_NAME_FIELDS = ("originalSenderDisplayName", "senderDisplayName", "messageSenderDisplayName")
+    QUOTE_SENDER_FIELDS = ("originalSender", "messageSender", "sender", "from")
+    QUOTE_TIME_FIELDS = ("originalSentDateTime", "originalCreatedDateTime", "originalMessageDateTime", "originalMessageTime", "sentDateTime", "createdDateTime", "originalArrivalTime")
+    QUOTE_BODY_FIELDS = ("originalMessageContent", "originalContent", "originalMessage", "messageContent", "content", "body", "originalMessagePreview", "messagePreview", "preview")
+    MAX_QUOTE_FIELD_CHARS = 300
     CARD_PREFIX = "application/vnd.microsoft.card."
     MAX_CARD_CHARS = 64 * 1024
 
@@ -205,6 +211,65 @@ class ChatHtmlSanitizer:
             if a.get("contentType") == "reference" and a.get("contentUrl"):
                 out.append({"id": a.get("id"), "name": a.get("name"), "contentUrl": a.get("contentUrl")})
         return out
+
+    @staticmethod
+    def quotes(message: dict) -> list[dict]:
+        """Forwarded messages and replies, which arrive as attachments: [{kind: "forward"|"reply", senderName, sentAt, content, contentType}], with no ids.
+
+        Graph documents only that a forward's `content` holds "the original message context", so several names are read. `content` goes to the client's message sanitizer like a message body."""
+        out = []
+        for a in message.get("attachments") or []:
+            kind = ChatHtmlSanitizer.QUOTE_KINDS.get(a.get("contentType"))
+            if kind is None:
+                continue
+            raw = a.get("content")
+            parsed = raw if isinstance(raw, dict) else None
+            if isinstance(raw, str) and len(raw) <= ChatHtmlSanitizer.MAX_CARD_CHARS:
+                try:
+                    parsed = json.loads(raw)
+                except ValueError:
+                    parsed = None
+            if not isinstance(parsed, dict):
+                parsed = {}
+            content, content_type = ChatHtmlSanitizer._quote_content(parsed)
+            quote = {"kind": kind, "senderName": ChatHtmlSanitizer._quote_sender(parsed), "sentAt": ChatHtmlSanitizer._first_text(parsed, ChatHtmlSanitizer.QUOTE_TIME_FIELDS), "content": content, "contentType": content_type}
+            if content is None and parsed:
+                quote["unread"] = sorted(k for k in parsed if isinstance(k, str) and k.isalnum())[:30]
+            out.append(quote)
+        return out
+
+    @staticmethod
+    def _first_text(values: dict, names: tuple[str, ...]) -> str | None:
+        return next((v[:ChatHtmlSanitizer.MAX_QUOTE_FIELD_CHARS] for v in (values.get(n) for n in names) if isinstance(v, str) and v.strip()), None)
+
+    @staticmethod
+    def _quote_sender(values: dict) -> str | None:
+        name = ChatHtmlSanitizer._first_text(values, ChatHtmlSanitizer.QUOTE_SENDER_NAME_FIELDS)
+        if name:
+            return name
+        for field_name in ChatHtmlSanitizer.QUOTE_SENDER_FIELDS:
+            sender = values.get(field_name)
+            if isinstance(sender, str) and sender.strip():
+                return sender[:ChatHtmlSanitizer.MAX_QUOTE_FIELD_CHARS]
+            if isinstance(sender, dict):
+                for who in (sender.get("user"), sender.get("application"), sender):
+                    name = ChatHtmlSanitizer._first_text(who, ("displayName",)) if isinstance(who, dict) else None
+                    if name:
+                        return name
+        return None
+
+    @staticmethod
+    def _quote_content(values: dict) -> tuple[str | None, str]:
+        for name in ChatHtmlSanitizer.QUOTE_BODY_FIELDS:
+            body = values.get(name)
+            if isinstance(body, dict):
+                kind, body = str(body.get("contentType") or "").lower(), body.get("content")
+            else:
+                kind = str(values.get(name + "Type") or values.get("contentType") or "").lower()
+            if isinstance(body, str) and body.strip():
+                is_html = kind == "html" or (kind != "text" and "<" in body and ">" in body)
+                return body[:ChatHtmlSanitizer.MAX_CARD_CHARS], "html" if is_html else "text"
+        return None, "text"
 
     @staticmethod
     def cards(message: dict) -> list[dict]:

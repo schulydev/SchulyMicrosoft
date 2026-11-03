@@ -15,11 +15,13 @@ from outnote._native import message_from_native
 
 from tests.services import AccountRunner, FileFetchError, ResourceTooLarge, Upload, _BrokerCache, chat_send, config, gifs, http_clients, onenote, outnote_client, profile, teams_files
 from src.api.app import app
+from src.domain.errors.service_error import ServiceError
 
 from tests.conftest import REAL_FETCH
 
 H = {config.REFRESH_TOKEN_HEADER: "frt-1"}
 CHUNK = 64 * 1024
+ANYWHERE = lambda url: True  # noqa: E731
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -156,7 +158,7 @@ def test_a_failed_upload_deletes_the_session_through_the_real_client(server, mon
 
 
 def test_a_download_streams_chunk_by_chunk_instead_of_loading_the_file(server, fresh_download_client):
-    stream = http_clients.stream_download(server.url + "/slow", 10 * CHUNK)
+    stream = http_clients.open_download(server.url + "/slow", 10 * CHUNK, ANYWHERE, "video/mp4", "a.mp4").chunks
     first = next(stream)  # the server holds the rest back until this arrives: a buffering client would hang here
     assert first and set(first) == {ord("a")} and len(first) <= CHUNK
     server.got_first.set()
@@ -164,9 +166,10 @@ def test_a_download_streams_chunk_by_chunk_instead_of_loading_the_file(server, f
     assert server.sent_rest_after_first and len(first) + len(rest) == 2 * CHUNK
 
 
-def test_a_download_stops_at_its_cap(server, fresh_download_client):
-    got = b"".join(http_clients.stream_download(server.url + "/big", CHUNK))
-    assert len(got) <= CHUNK
+def test_a_download_past_its_cap_is_refused_before_any_byte(server, fresh_download_client):
+    with pytest.raises(ServiceError) as big:
+        http_clients.open_download(server.url + "/big", CHUNK, ANYWHERE, "video/mp4", "a.mp4")
+    assert big.value.status == 413
 
 
 def test_fetch_bytes_refuses_past_its_cap_and_does_not_follow_redirects(server, fresh_download_client, monkeypatch):
@@ -180,15 +183,16 @@ def test_fetch_bytes_refuses_past_its_cap_and_does_not_follow_redirects(server, 
     assert not any(s["path"] == "/landed" for s in server.seen)
 
 
-def test_stream_download_can_refuse_redirects(server, fresh_download_client):
-    with pytest.raises(Exception):
-        list(http_clients.stream_download(server.url + "/redirect", CHUNK, follow_redirects=False))
+def test_a_download_redirect_must_pass_the_host_check_again(server, fresh_download_client):
+    with pytest.raises(ServiceError) as refused:
+        http_clients.open_download(server.url + "/redirect", CHUNK, lambda url: "/landed" not in url, "video/mp4", "a.mp4")
+    assert refused.value.status == 502
     assert not any(s["path"] == "/landed" for s in server.seen)
 
 
 def test_the_shared_download_client_keeps_no_cookies_between_accounts(server, fresh_download_client):
-    list(http_clients.stream_download(server.url + "/cookie", CHUNK))
-    list(http_clients.stream_download(server.url + "/cookie", CHUNK))
+    list(http_clients.open_download(server.url + "/cookie", CHUNK, ANYWHERE, "video/mp4", "a.mp4").chunks)
+    list(http_clients.open_download(server.url + "/cookie", CHUNK, ANYWHERE, "video/mp4", "a.mp4").chunks)
     assert not any(s["headers"].get("Cookie") for s in server.seen)
     assert http_clients.download_client() is http_clients.download_client()
 
@@ -275,8 +279,14 @@ class ServeNote:
         self.status, self.folder = status, folder
         self.select = []
 
-    def get(self, path, params=None):
-        self.select.append((params or {}).get("$select") or path.partition("$select=")[2])
+    def chat_message(self, chat_id, message_id):
+        return self.get(f"chats/{chat_id}/messages/{message_id}")
+
+    def list(self, path, params=None, limit=None, retry=True):
+        return [{"id": "1", "attachments": [{"id": "a1", "name": "f.docx", "contentType": "reference", "contentUrl": CONTENT_URL}]}]
+
+    def get(self, path, params=None, retry=True):
+        self.select.append((params or {}).get("$select") or path.partition("$select=")[2] or "the whole item")
         if "/messages/" in path:
             return {"attachments": [{"id": "a1", "name": "f.docx", "contentType": "reference", "contentUrl": CONTENT_URL}]}
         if self.folder:
@@ -299,7 +309,7 @@ def test_a_folder_says_it_is_a_folder_on_all_three_download_routes(monkeypatch, 
     note = ServeNote(folder=True)
     r = route_with(monkeypatch, note, Rotating()).get(url, headers=H)
     assert r.status_code == 404 and "folder" in r.json()["detail"]
-    assert any("folder" in s for s in note.select)
+    assert any("folder" in s or s == "the whole item" for s in note.select)
 
 
 def test_the_fallback_link_still_gets_the_host_check(monkeypatch):
