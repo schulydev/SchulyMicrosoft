@@ -279,3 +279,42 @@ def test_convert_text_body_cap(env, monkeypatch):
     monkeypatch.setattr(app_module, "MAX_TEXT_SOURCE_BYTES", 100)
     assert client.post("/api/convert/text?name=x.txt", content=b"a" * 101, headers=H).status_code == 413
     assert client.post("/api/convert/text?name=x.txt", content=b"a" * 100, headers=H).json()["text"] == "a" * 100
+
+
+class LinkNote:
+    def __init__(self, plain=None, redirect=None):
+        self.plain, self.location, self.paths = plain, redirect, []
+
+    def get(self, path):
+        self.paths.append(path)
+        return self.plain
+
+    def redirect(self, path):
+        self.paths.append(path)
+        if self.location is None:
+            raise teams_files.GraphError(404, "no content")
+        return self.location
+
+
+LINK = "https://contoso.sharepoint.com/download?tempauth=x"
+
+
+def test_download_url_uses_the_link_from_the_select_answer():
+    note = LinkNote()
+    assert teams_files.download_url(note, "me/drive/items/I", {"@microsoft.graph.downloadUrl": LINK}) == LINK
+    assert note.paths == []
+
+
+def test_download_url_asks_again_without_select():
+    note = LinkNote(plain={"@microsoft.graph.downloadUrl": LINK})
+    assert teams_files.download_url(note, "me/drive/items/I", {"name": "Plan.xlsx"}) == LINK
+
+
+def test_download_url_falls_back_to_the_content_redirect():
+    note = LinkNote(plain={"name": "Plan.xlsx"}, redirect=LINK)
+    assert teams_files.download_url(note, "me/drive/items/I", {}) == LINK
+    assert note.paths == ["me/drive/items/I", "me/drive/items/I/content"]
+
+
+def test_download_url_is_none_when_microsoft_offers_nothing():
+    assert teams_files.download_url(LinkNote(plain={}), "me/drive/items/I", {}) is None

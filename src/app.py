@@ -637,9 +637,9 @@ async def chat_file(chat_id: str, message_id: str, attachment_id: str, token: st
         item = note.get(chat_read.drive_item_path(ref["contentUrl"], "name,size,file,@microsoft.graph.downloadUrl"))
         if (item.get("size") or 0) > MAX_CHAT_FILE_BYTES:
             raise HTTPException(status_code=413, detail="The file is larger than 100 MB.")
-        url = item.get("@microsoft.graph.downloadUrl")
+        url = teams_files.download_url(note, f"shares/{chat_read.share_id(ref['contentUrl'])}/driveItem", item)
         if not url:
-            raise HTTPException(status_code=404, detail="The file has no download link.")
+            raise HTTPException(status_code=502, detail="Microsoft did not offer a download link for this file.")
         return item, url
 
     carrier = Response()
@@ -886,9 +886,9 @@ async def drive_item_content(drive_id: str, item_id: str, token: str = Header(..
             raise HTTPException(status_code=404, detail="File not found.")
         if (item.get("size") or 0) > teams_files.MAX_DOWNLOAD_BYTES:
             raise HTTPException(status_code=413, detail="The file is larger than 100 MB.")
-        url = item.get("@microsoft.graph.downloadUrl")
+        url = teams_files.download_url(note, teams_files.item_base(drive_id, item_id), item)
         if not url:
-            raise HTTPException(status_code=404, detail="The file has no download link.")
+            raise HTTPException(status_code=502, detail="Microsoft did not offer a download link for this file.")
         if not teams_files.is_download_url(url):
             raise HTTPException(status_code=502, detail="The file has an unexpected download location.")
         return item, url
@@ -938,9 +938,9 @@ def _file_text(note, drive_id: str | None, item_id: str, offset: int, max_chars:
             name = posixpath.splitext(name)[0] + ".pdf"
             notes.append("Converted to PDF by Microsoft 365 before reading.")
         else:
-            url = item.get("@microsoft.graph.downloadUrl")
+            url = teams_files.download_url(note, teams_files.item_base(drive_id, item_id), item)
             if not url:
-                raise HTTPException(status_code=404, detail="The file has no download link.")
+                raise HTTPException(status_code=502, detail="Microsoft did not offer a download link for this file.")
             data = teams_files.fetch_bytes(url, file_text.MAX_SOURCE_BYTES)
         result = file_text.extract(name, data, offset, max_chars, sheet, row_offset, max_rows, notes)
     except file_text.TextError as ex:
