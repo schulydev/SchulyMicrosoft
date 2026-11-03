@@ -8,9 +8,11 @@ without an e-mail, then reference the file in the message (`<attachment id="GUID
 """
 
 import base64
+import logging
 import re
 from urllib.parse import quote
 from entrance import http_client
+from outnote import GraphError
 
 from src.application.abstractions.i_chat_sender import IChatSender
 from src.application.abstractions.i_emoji_catalogue import IEmojiCatalogue
@@ -22,6 +24,7 @@ from src.domain.chat.outgoing_message import OutgoingMessage
 from src.domain.chat.upload import Upload
 from src.domain.errors.emoji_error import EmojiError
 from src.domain.errors.send_error import SendError
+from src.infrastructure.logging_config import LoggerNames
 
 
 class ChatSender(IChatSender):
@@ -40,7 +43,9 @@ class ChatSender(IChatSender):
     IMPORTANCE = ("normal", "high", "urgent")
     GUID_IN_ETAG = re.compile(r"\{([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})\}")
     USER_ID = re.compile(r"[A-Za-z0-9@._-]{1,200}")
+    EXPANDED_MEMBERS_CEILING = 20  # at this many, Graph may have cut the expanded list short
     http_client = staticmethod(http_client)
+    log = logging.getLogger(LoggerNames.SERVICE)
 
     def __init__(self, html: ChatHtmlSanitizer, emojis: IEmojiCatalogue, profile: IProfileReader):
         self._html = html
@@ -165,12 +170,25 @@ class ChatSender(IChatSender):
             raise SendError(502, "OneDrive did not confirm the upload.")
         return item
 
+    def chat_members(self, note, chat_id: str) -> list[dict]:
+        """Graph throttles `chats/{id}/members` on its own while the same chat with its members expanded answers, so a long list is the only reason to ask the throttled route."""
+        members = note.get(f"chats/{chat_id}", {"$expand": "members"}).get("members") or []
+        if len(members) < self.EXPANDED_MEMBERS_CEILING:
+            return members
+        try:
+            return note.list(f"chats/{chat_id}/members")
+        except GraphError as ex:
+            if ex.status != 429:
+                raise
+            self.log.warning("Chat members route throttled; using the %d expanded members, which may be incomplete", len(members))
+            return members
+
     def chat_member_ids(self, note, broker, chat_id: str) -> list[str]:
         if chat_id == self.SELF_CHAT:
             return []
         me = self._profile.get(note, broker).get("id")
         ids = []
-        for m in note.list(f"chats/{chat_id}/members"):
+        for m in self.chat_members(note, chat_id):
             uid = m.get("userId")
             if isinstance(uid, str) and uid != me and uid not in ids:
                 ids.append(uid)

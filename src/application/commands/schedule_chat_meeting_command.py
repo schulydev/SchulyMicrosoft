@@ -37,7 +37,7 @@ class ScheduleChatMeetingHandler(ICommandHandler[ScheduleChatMeetingCommand, dic
             raise ServiceError(400, "end must be after start.")
 
         def create(note, broker):
-            members = [] if command.chat_id == self._sender.SELF_CHAT else note.list(f"chats/{command.chat_id}/members")
+            members = [] if command.chat_id == self._sender.SELF_CHAT else self._sender.chat_members(note, command.chat_id)
             me = self._profile.get(note, broker)
             mine = {(me.get("mail") or "").lower(), (me.get("userPrincipalName") or "").lower()}
             attendees = [{"emailAddress": {"address": m["email"], "name": m.get("displayName") or m["email"]}, "type": "required"} for m in members if m.get("email") and m["email"].lower() not in mine]

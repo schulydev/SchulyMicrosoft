@@ -29,6 +29,8 @@ class Broker:
 class Note:
     def __init__(self):
         self.calls = []
+        self.members_throttled = False
+        self.expanded = None
         self.messages = []
         self.members = [{"userId": "me-id", "email": "me@school.ch"}, {"userId": "u2", "email": "bo@school.ch", "displayName": "Bo"}]
 
@@ -53,6 +55,8 @@ class Note:
     def list(self, path, params=None, limit=None):
         self.calls.append(("list", path))
         if path.endswith("/members"):
+            if self.members_throttled:
+                raise GraphError(429, "throttled", retry_after=62)
             return self.members
         if path == "me/chats":
             return [{"id": "19:g@thread.v2", "chatType": "group"}, {"id": "19:o@unq.gbl.spaces", "chatType": "oneOnOne"}]
@@ -60,6 +64,8 @@ class Note:
 
     def get(self, path, params=None, raw=False):
         self.calls.append(("get", path, raw))
+        if params == {"$expand": "members"}:
+            return {"members": self.expanded if self.expanded is not None else self.members}
         if path == "me":
             return {"id": "me-id", "mail": "me@school.ch"}
         if "hostedContents" in path:
@@ -341,6 +347,39 @@ def test_meeting_invites_the_chat_members_and_returns_the_join_url(env):
     assert event["isOnlineMeeting"] and event["onlineMeetingProvider"] == "teamsForBusiness"
     assert event["start"] == {"dateTime": "2026-11-02T13:00:00", "timeZone": "UTC"}
     assert [a["emailAddress"]["address"] for a in event["attendees"]] == ["bo@school.ch"]
+
+
+def _send_file(note):
+    data = {"content": "hi", "contentType": "text"}
+    return TestClient(app).post("/api/chats/19:g@thread.v2/messages", headers=H, data=data, files=[("files", ("a.png", PNG, "image/png"))])
+
+
+def _invited(note):
+    return [r["objectId"] for r in next(c for c in note.calls if c[0] == "post" and c[1].endswith("/invite"))[2]["recipients"]]
+
+
+def test_a_file_send_survives_a_throttled_members_route(env):
+    note, _ = env
+    note.members_throttled = True
+    assert _send_file(note).status_code < 300
+    assert _invited(note) == ["u2"]
+    assert not any(c[:2] == ("list", "chats/19:g@thread.v2/members") for c in note.calls)
+
+
+def test_a_long_expanded_list_asks_the_members_route_for_everyone(env):
+    note, _ = env
+    note.expanded = [{"userId": f"e{i}"} for i in range(20)]
+    note.members = [{"userId": f"e{i}"} for i in range(30)]
+    assert _send_file(note).status_code < 300
+    assert len(_invited(note)) == 30
+
+
+def test_a_long_expanded_list_is_used_when_the_members_route_is_throttled(env):
+    note, _ = env
+    note.members_throttled = True
+    note.expanded = [{"userId": f"e{i}"} for i in range(20)]
+    assert _send_file(note).status_code < 300
+    assert len(_invited(note)) == 20
 
 
 def test_gif_search_needs_a_giphy_key(env, monkeypatch):
