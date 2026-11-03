@@ -644,6 +644,8 @@ async def chat_file(chat_id: str, message_id: str, attachment_id: str, token: st
         if (item.get("size") or 0) > MAX_CHAT_FILE_BYTES:
             raise HTTPException(status_code=413, detail="The file is larger than 100 MB.")
         url = _download_link(note, f"shares/{chat_read.share_id(ref['contentUrl'])}/driveItem", item)
+        if not teams_files.is_download_url(url):
+            raise HTTPException(status_code=502, detail="The file has an unexpected download location.")
         return item, url
 
     carrier = Response()
@@ -655,7 +657,7 @@ async def chat_file(chat_id: str, message_id: str, attachment_id: str, token: st
     headers["X-Content-Type-Options"] = "nosniff"
     headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
     # The download URL is pre-authorized and short-lived; the bytes stream through without being held.
-    return StreamingResponse(outnote_client.stream_download(url, MAX_CHAT_FILE_BYTES), media_type=_safe_content_type((item.get("file") or {}).get("mimeType")), headers=headers)
+    return StreamingResponse(outnote_client.stream_download(url, MAX_CHAT_FILE_BYTES, follow_redirects=False), media_type=_safe_content_type((item.get("file") or {}).get("mimeType")), headers=headers)
 
 
 @app.get("/api/chats/{chat_id}/messages/{message_id}/files/{attachment_id}/thumbnail", tags=["Microsoft 365"], response_class=Response, responses={200: {"content": {"image/jpeg": {}}}})
