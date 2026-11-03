@@ -6,9 +6,9 @@ import pytest
 from fastapi.testclient import TestClient
 from outnote import GraphError
 
-from src import config, onenote, onenote_html, outnote_client
-from src.account_cache import AccountCache
-from src.app import app
+from tests.services import ResourceTooLarge, config, onenote, onenote_html, outnote_client
+from src.infrastructure.microsoft.account_cache import AccountCache
+from src.api.app import app
 
 GROUP = "3f2a9c10-1111-4222-8333-944455556666"
 H = {config.REFRESH_TOKEN_HEADER: "old-frt"}
@@ -378,7 +378,7 @@ def test_resources_serve_only_images_inline_and_files_as_downloads(graph, monkey
 
 def test_an_oversized_resource_is_refused(graph, monkeypatch):
     def too_big(broker, rid, limit):
-        raise onenote.ResourceTooLarge()
+        raise ResourceTooLarge()
 
     monkeypatch.setattr(onenote, "resource", too_big)
     assert client().get("/api/onenote/resources/0-a", headers=H).status_code == 413

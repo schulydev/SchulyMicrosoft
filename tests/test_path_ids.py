@@ -3,8 +3,8 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from src import config, outnote_client
-from src.app import app
+from tests.services import config, outnote_client
+from src.api.app import app
 
 H = {config.REFRESH_TOKEN_HEADER: "old-frt"}
 BAD = ["..", ".", "a..b", "%2E%2E", "%252E%252E"]
@@ -30,11 +30,11 @@ def calls(monkeypatch):
 
 @pytest.mark.parametrize("bad", BAD)
 def test_the_shared_validator_refuses_dot_segments(bad):
-    from fastapi import HTTPException
-    from src.app import GRAPH_ID_PATTERN, _check_id
+    from src.domain.errors.service_error import ServiceError as HTTPException
+    from src.domain.validation.graph_ids import GraphIds
     for value in (bad, f"a/{bad}/b"):
         with pytest.raises(HTTPException):
-            _check_id(value, GRAPH_ID_PATTERN, "id")
+            GraphIds.check(value, GraphIds.GRAPH_ID_PATTERN, "id")
 
 
 # A literal "." or ".." in a URL path is collapsed by the HTTP client before it is sent, so the routes are probed with the encoded and embedded forms.

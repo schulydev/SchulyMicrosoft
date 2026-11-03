@@ -6,7 +6,7 @@ from datetime import date
 
 import pytest
 
-from src import file_text
+from tests.services import TextError, file_text
 
 
 def docx_bytes():
@@ -106,7 +106,7 @@ def test_xlsx_rows_dates_sheets_and_paging():
     assert nxt["text"].splitlines()[0] == "r1,,1" and nxt["nextRowOffset"] is None
     other = file_text.extract("Sheet.xlsx", xlsx_bytes(), sheet="Other")
     assert other["text"] == "only\n" and other["sheet"] == "Other"
-    with pytest.raises(file_text.TextError) as ex:
+    with pytest.raises(TextError) as ex:
         file_text.extract("Sheet.xlsx", xlsx_bytes(), sheet="Nope")
     assert ex.value.status == 404
 
@@ -140,24 +140,24 @@ def test_text_decoding_and_html():
 
 def test_unknown_and_legacy_types_are_415():
     for name in ("a.exe", "a.png", "noext"):
-        with pytest.raises(file_text.TextError) as ex:
+        with pytest.raises(TextError) as ex:
             file_text.extract(name, b"x")
         assert ex.value.status == 415 and str(ex.value) == "This file type cannot be read as text."
     assert file_text.kind_of("old.doc") == "legacy" and file_text.kind_of("a.ODS") == "legacy"
-    with pytest.raises(file_text.TextError) as ex:
+    with pytest.raises(TextError) as ex:
         file_text.extract("old.doc", b"x")
     assert ex.value.status == 415
 
 
 def test_source_cap_is_413(monkeypatch):
     monkeypatch.setattr(file_text, "MAX_SOURCE_BYTES", 10)
-    with pytest.raises(file_text.TextError) as ex:
+    with pytest.raises(TextError) as ex:
         file_text.extract("a.txt", b"x" * 11)
     assert ex.value.status == 413
 
 
 def test_damaged_office_file_is_422():
-    with pytest.raises(file_text.TextError) as ex:
+    with pytest.raises(TextError) as ex:
         file_text.extract("a.docx", b"not a zip")
     assert ex.value.status == 422
 
@@ -172,18 +172,18 @@ def _zip(members):
 
 def test_zip_bomb_guards(monkeypatch):
     monkeypatch.setattr(file_text, "MAX_UNCOMPRESSED", 1000)
-    with pytest.raises(file_text.TextError) as ex:
+    with pytest.raises(TextError) as ex:
         file_text.extract("a.xlsx", _zip({"a.xml": b"0" * 5000}))
     assert ex.value.status == 413
     monkeypatch.setattr(file_text, "MAX_UNCOMPRESSED", 200 * 1024 * 1024)
     monkeypatch.setattr(file_text, "RATIO_FROM", 1000)
-    with pytest.raises(file_text.TextError) as ex:
+    with pytest.raises(TextError) as ex:
         file_text.extract("a.docx", _zip({"word/document.xml": b"0" * 100000}))
     assert ex.value.status == 413
 
 
 def test_xml_entity_declarations_are_refused():
     evil = b'<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "boom">]><x>&a;</x>'
-    with pytest.raises(file_text.TextError) as ex:
+    with pytest.raises(TextError) as ex:
         file_text.extract("a.pptx", _zip({"ppt/presentation.xml": evil}))
     assert ex.value.status == 422

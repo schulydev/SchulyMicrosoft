@@ -3,8 +3,7 @@
 import pytest
 from entrance import _foci
 
-from src import outnote_client
-from src.outnote_client import _BrokerCache
+from tests.services import _BrokerCache, outnote_client
 
 
 class Calls(list):

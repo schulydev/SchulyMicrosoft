@@ -4,9 +4,9 @@ import pytest
 from fastapi.testclient import TestClient
 from outnote import GraphError
 
-from src import config, outnote_client
-from src import app as app_module
-from src.app import app
+from tests.services import config, outnote_client
+
+from src.api.app import app
 
 
 class FakeNote:

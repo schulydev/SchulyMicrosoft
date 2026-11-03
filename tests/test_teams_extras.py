@@ -7,8 +7,8 @@ import pytest
 from fastapi.testclient import TestClient
 from outnote import GraphError
 
-from src import account_cache, chat_html, chat_send, config, folder_roles, outnote_client, teams_chat
-from src.app import app
+from tests.services import OutgoingMessage, SendError, Upload, account_cache, chat_html, chat_send, config, folder_roles, http_clients, outnote_client, teams_chat
+from src.api.app import app
 
 H = {config.REFRESH_TOKEN_HEADER: "old-frt"}
 PNG = b"\x89PNG\r\n\x1a\n" + b"x" * 20
@@ -158,7 +158,7 @@ class FakeHttp:
 def http(monkeypatch):
     fake = FakeHttp()
     monkeypatch.setattr(teams_chat, "http_client", lambda: fake)
-    monkeypatch.setattr(outnote_client, "download_client", lambda: fake)
+    monkeypatch.setattr(http_clients, "download_client", lambda: fake)
     return fake
 
 
@@ -318,7 +318,7 @@ def test_large_files_go_through_an_upload_session_in_320k_multiples(monkeypatch)
             assert path.endswith(":/createUploadSession")
             return {"uploadUrl": "https://upload.example/session"}
 
-    item = chat_send.upload_file(N(), chat_send.Upload("big.mp4", io.BytesIO(b"x" * size), size, "video/mp4"))
+    item = chat_send.upload_file(N(), Upload("big.mp4", io.BytesIO(b"x" * size), size, "video/mp4"))
     assert item == {"id": "BIG"}
     assert all(n % (320 * 1024) == 0 for n, _ in http.puts[:-1])
     assert http.puts[-1][1] == f"bytes {chat_send.UPLOAD_CHUNK}-{size - 1}/{size}"
@@ -326,8 +326,8 @@ def test_large_files_go_through_an_upload_session_in_320k_multiples(monkeypatch)
 
 def test_files_over_100_mb_are_refused():
     import io
-    with pytest.raises(chat_send.SendError) as ex:
-        chat_send.validate(chat_send.OutgoingMessage(content="x", files=[chat_send.Upload("a", io.BytesIO(), chat_send.MAX_FILE_BYTES + 1)]))
+    with pytest.raises(SendError) as ex:
+        chat_send.validate(OutgoingMessage(content="x", files=[Upload("a", io.BytesIO(), chat_send.MAX_FILE_BYTES + 1)]))
     assert ex.value.status == 413
 
 
@@ -358,7 +358,7 @@ def test_gif_search_needs_a_microsoft_sign_in(env, monkeypatch):
 
 
 def test_gif_search_is_rate_limited_per_account(env, monkeypatch):
-    from src import gifs
+    from tests.services import gifs
     monkeypatch.setenv("GIPHY_API_KEY", "k")
     monkeypatch.setattr(gifs, "_search", lambda key, query, limit: [])
     client = TestClient(app)
@@ -367,7 +367,7 @@ def test_gif_search_is_rate_limited_per_account(env, monkeypatch):
 
 
 def test_gif_search_returns_only_giphy_urls(env, monkeypatch):
-    from src import gifs
+    from tests.services import gifs
     calls = []
 
     class Http:
@@ -400,7 +400,7 @@ def test_account_cache_expires_and_is_bounded(monkeypatch):
 
 def test_no_response_carrying_a_token_is_cacheable(env, http, monkeypatch):
     """Every route that can hand back a rotated refresh token must forbid storing the response."""
-    from src import gifs
+    from tests.services import gifs
     note, _ = env
     monkeypatch.setenv("GIPHY_API_KEY", "k")
     monkeypatch.setattr(gifs, "_search", lambda key, query, limit: [])
@@ -455,7 +455,7 @@ def test_oversized_sends_are_refused_before_parsing(env):
     r = client.post("/api/chats/c1/messages", headers={**H, "Content-Length": str(200 * 1024 * 1024), "Content-Type": "multipart/form-data; boundary=x"}, content=b"--x--")
     assert r.status_code == 413
     big = b"--x\r\nContent-Disposition: form-data; name=\"files\"; filename=\"a.bin\"\r\n\r\n" + b"0" * (300 * 1024) + b"\r\n--x--\r\n"
-    import src.app as app_module
+    from tests.services import app_module
     old = app_module.MAX_SEND_BYTES
     app_module.MAX_SEND_BYTES = 100 * 1024
     try:

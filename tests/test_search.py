@@ -4,8 +4,8 @@ import pytest
 from fastapi.testclient import TestClient
 from outnote import GraphError
 
-from src import config, outnote_client, search
-from src.app import app
+from tests.services import config, outnote_client, search
+from src.api.app import app
 
 H = {config.REFRESH_TOKEN_HEADER: "old-frt"}
 TEAM = "11111111-2222-3333-4444-555555555555"

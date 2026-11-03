@@ -11,8 +11,8 @@ import pytest
 from entrance import MfaCancelled, MfaSwitch, PushEvent
 from fastapi.testclient import TestClient
 
-from src import outnote_client, password_signin
-from src.app import app
+from tests.services import SignInJob, outnote_client, sign_in_options, sign_in_store
+from src.api.app import app
 
 PASSWORD = "Tr0ub4dor&3-never-leak-me"
 USER = "alex@school.ch"
@@ -37,10 +37,10 @@ HEADERS = {"X-Schuly-Service-Key": KEY, "X-Schuly-User-Id": UID}
 @pytest.fixture(autouse=True)
 def clean(monkeypatch):
     monkeypatch.setenv("SCHULY_SERVICE_KEY", KEY)
-    password_signin.store.clear()
+    sign_in_store.clear()
     monkeypatch.setattr(outnote_client, "build_client", lambda frt: (FakeNote(), FakeBroker(frt)))
     yield
-    password_signin.store.clear()
+    sign_in_store.clear()
 
 
 @pytest.fixture
@@ -58,7 +58,7 @@ def scripted(monkeypatch, script):
         del submitted
         return script(kw["mfa"])
 
-    monkeypatch.setattr(password_signin.entrance, "foci_login", login)
+    monkeypatch.setattr(entrance, "foci_login", login)
 
 
 def drive(prompt, offered, push=None, code=None, wrong=0):
@@ -255,7 +255,7 @@ def test_failures_map_to_stable_codes(api, monkeypatch, error, code):
     scripted(monkeypatch, fail)
     body = start(api).json()
     assert body["status"] == "error" and body["code"] == code
-    assert body["message"] == password_signin.MESSAGES[code]
+    assert body["message"] == SignInJob.MESSAGES[code]
     assert "refresh_token" not in body
 
 
@@ -285,23 +285,23 @@ def test_expired_job_is_gone(api, monkeypatch):
     approve = threading.Event()
     scripted(monkeypatch, lambda p: drive(p, BOTH, push=push_wait(approve)))
     sid = start(api).json()["sign_in_id"]
-    job = password_signin.store.get(sid, UID)
+    job = sign_in_store.get(sid, UID)
     job.expires = time.monotonic() - 1
     assert api.get(f"/api/auth/password/{sid}").status_code == 404
-    assert len(password_signin.store) == 0
+    assert len(sign_in_store) == 0
 
 
 def test_sweeper_drops_expired_and_stale_finished_jobs(api, monkeypatch):
     scripted(monkeypatch, lambda p: FakeBroker())
     sid = start(api).json()["sign_in_id"]
-    assert len(password_signin.store) == 1
-    password_signin.store.get(sid, UID).done_at = time.monotonic() - password_signin.DONE_TTL - 1
-    password_signin.store.sweep()
-    assert len(password_signin.store) == 0
+    assert len(sign_in_store) == 1
+    sign_in_store.get(sid, UID).done_at = time.monotonic() - sign_in_options.done_ttl - 1
+    sign_in_store.sweep()
+    assert len(sign_in_store) == 0
 
 
 def test_ttl_is_capped_at_ten_minutes():
-    assert password_signin.JOB_TTL <= 600
+    assert sign_in_options.job_ttl <= 600
 
 
 def test_delete_cancels_the_worker(api, monkeypatch):
@@ -363,7 +363,7 @@ def test_malformed_code_is_rejected(api, monkeypatch):
 
 # --- rate limits -------------------------------------------------------------------------------------
 def test_per_client_rate_limit(api, monkeypatch):
-    monkeypatch.setattr(password_signin, "CLIENT_LIMIT", 2)
+    monkeypatch.setattr(sign_in_options, "client_limit", 2)
     scripted(monkeypatch, lambda p: FakeBroker())
     assert start(api, username="a@school.ch").status_code == 200
     assert start(api, username="b@school.ch").status_code == 200
@@ -372,7 +372,7 @@ def test_per_client_rate_limit(api, monkeypatch):
 
 
 def test_only_failed_attempts_count_against_the_account_limit(api, monkeypatch):
-    monkeypatch.setattr(password_signin, "ACCOUNT_LIMIT", 2)
+    monkeypatch.setattr(sign_in_options, "account_limit", 2)
     scripted(monkeypatch, lambda p: FakeBroker())
     for _ in range(4):  # successes never count
         assert start(api).json()["status"] == "complete"
@@ -389,7 +389,7 @@ def test_only_failed_attempts_count_against_the_account_limit(api, monkeypatch):
 
 
 def test_a_third_party_cannot_lock_a_victim_out(api, monkeypatch):
-    monkeypatch.setattr(password_signin, "ACCOUNT_LIMIT", 2)
+    monkeypatch.setattr(sign_in_options, "account_limit", 2)
 
     def wrong(prompt):
         raise entrance.InvalidCredentials("no")
@@ -404,7 +404,7 @@ def test_a_third_party_cannot_lock_a_victim_out(api, monkeypatch):
 
 
 def test_max_concurrent_jobs(api, monkeypatch):
-    monkeypatch.setattr(password_signin, "MAX_JOBS", 1)
+    monkeypatch.setattr(sign_in_options, "max_jobs", 1)
     scripted(monkeypatch, lambda p: drive(p, BOTH))
     assert start(api, username="a@school.ch").json()["status"] == "mfa_required"
     r = start(api, username="b@school.ch")
@@ -447,13 +447,13 @@ def test_password_is_not_in_the_job_store_at_any_stage(api, monkeypatch):
     approve = threading.Event()
     scripted(monkeypatch, lambda p: drive(p, BOTH, push=push_wait(approve)))
     sid = start(api).json()["sign_in_id"]
-    assert not reaches(password_signin.store, PASSWORD)
+    assert not reaches(sign_in_store, PASSWORD)
     api.post(f"/api/auth/password/{sid}/method", json={"method": "push"})
-    assert not reaches(password_signin.store, PASSWORD)
+    assert not reaches(sign_in_store, PASSWORD)
     approve.set()
     until(api, sid, "complete")
-    assert not reaches(password_signin.store, PASSWORD)
-    assert not reaches(password_signin.store._jobs[sid], PASSWORD)
+    assert not reaches(sign_in_store, PASSWORD)
+    assert not reaches(sign_in_store._jobs[sid], PASSWORD)
 
 
 def test_reaches_helper_actually_finds_strings():
@@ -488,7 +488,7 @@ def test_password_never_in_logs_or_responses(api, monkeypatch, caplog, fail_with
     for text in seen:
         assert PASSWORD not in text
     assert PASSWORD not in caplog.text
-    assert not reaches(password_signin.store, PASSWORD)
+    assert not reaches(sign_in_store, PASSWORD)
 
 
 def test_validation_errors_do_not_echo_the_password(api):
@@ -507,7 +507,7 @@ def test_other_routes_keep_the_default_validation_body(api):
 
 
 def test_password_model_never_reprs_the_password():
-    from src.models import PasswordStartRequest
+    from src.application.dtos.password_start_request import PasswordStartRequest
 
     model = PasswordStartRequest(username=USER, password=PASSWORD)
     assert PASSWORD not in repr(model) and PASSWORD not in model.model_dump_json()
@@ -521,7 +521,7 @@ def test_secret_is_spent_after_submit(api, monkeypatch):
         spent.append(secret)
         return FakeBroker()
 
-    monkeypatch.setattr(password_signin.entrance, "foci_login", login)
+    monkeypatch.setattr(entrance, "foci_login", login)
     assert start(api).json()["status"] == "complete"
     assert spent and not spent[0] and PASSWORD not in repr(spent[0])
 
@@ -599,7 +599,7 @@ def real_entrance(monkeypatch):
     _MsSession.gate = threading.Event()
     real_sleep = time.sleep
     monkeypatch.setattr(ep.time, "sleep", lambda s: real_sleep(0.005))
-    monkeypatch.setattr(password_signin, "PUSH_INTERVAL", 0)
+    monkeypatch.setattr(sign_in_options, "push_interval", 0)
     monkeypatch.setattr(ef, "_post_token", lambda url, data: {"refresh_token": "real-frt", "access_token": "at"})
 
 
@@ -612,7 +612,7 @@ def test_real_entrance_push(api, real_entrance):
     _MsSession.gate.set()
     done = until(api, sid, "complete")
     assert done["refresh_token"] == "real-frt" and done["account"]["email"] == USER
-    assert not reaches(password_signin.store, PASSWORD)
+    assert not reaches(sign_in_store, PASSWORD)
 
 
 def test_real_entrance_otp_wrong_then_ok(api, real_entrance):
@@ -644,7 +644,7 @@ def test_password_routes_need_the_service_key_and_a_user_id(monkeypatch, headers
     assert bare.delete("/api/auth/password/x", headers=headers).status_code == 401
     assert bare.post("/api/auth/password/x/method", json={"method": "push"}, headers=headers).status_code == 401
     assert bare.post("/api/auth/password/x/otp", json={"code": "123456"}, headers=headers).status_code == 401
-    assert len(password_signin.store) == 0
+    assert len(sign_in_store) == 0
 
 
 def test_routes_are_disabled_when_no_service_key_is_configured(monkeypatch):
@@ -710,7 +710,7 @@ def test_otp_budget_per_job_cannot_be_reset_by_rechoosing(api, monkeypatch):
 
 
 def test_otp_budget_per_account_holds_across_jobs(api, monkeypatch):
-    monkeypatch.setattr(password_signin, "OTP_ACCOUNT_BUDGET", 4)
+    monkeypatch.setattr(sign_in_options, "otp_account_budget", 4)
     scripted(monkeypatch, lambda p: drive(p, BOTH, code="654321"))
     sid = start(api).json()["sign_in_id"]
     api.post(f"/api/auth/password/{sid}/method", json={"method": "otp"})

@@ -6,8 +6,8 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from src import browser_auth, outnote_client
-from src.app import app
+from tests.services import browser_auth, http_clients, outnote_client
+from src.api.app import app
 
 
 def test_start_builds_a_pkce_authorize_url():
@@ -41,13 +41,13 @@ def mock_token(monkeypatch):
             return httpx.Response(200, json={"access_token": "at", "refresh_token": "frt-from-browser", "expires_in": 3600})
         return httpx.Response(400, json={"error": "invalid_grant", "error_description": "bad code"})
 
-    original = outnote_client._post
+    original = http_clients.post_form
 
     async def patched(url, data, client=None):
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
             return await original(url, data, c)
 
-    monkeypatch.setattr(outnote_client, "_post", patched)
+    monkeypatch.setattr(http_clients, "post_form", patched)
     monkeypatch.setattr(outnote_client, "build_client", lambda frt: (FakeNote(), type("B", (), {"refresh_token": frt})()))
     return seen
 

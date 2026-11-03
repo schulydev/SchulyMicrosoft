@@ -13,9 +13,9 @@ from fastapi.testclient import TestClient
 from outnote import GraphError, OutNote
 from outnote._native import message_from_native
 
-from src import chat_send, config, gifs, onenote, outnote_client, profile, teams_files
-from src.app import app
-from src.outnote_client import _BrokerCache
+from tests.services import AccountRunner, FileFetchError, ResourceTooLarge, Upload, _BrokerCache, chat_send, config, gifs, http_clients, onenote, outnote_client, profile, teams_files
+from src.api.app import app
+
 from tests.conftest import REAL_FETCH
 
 H = {config.REFRESH_TOKEN_HEADER: "frt-1"}
@@ -85,9 +85,9 @@ def server():
 
 @pytest.fixture
 def fresh_download_client(monkeypatch):
-    monkeypatch.setattr(outnote_client, "_download_client", None)
+    monkeypatch.setattr(http_clients, "_download_client", None)
     yield
-    client = outnote_client._download_client
+    client = http_clients._download_client
     if client is not None:
         client.close()
 
@@ -124,7 +124,7 @@ def test_an_upload_session_goes_through_the_real_client(server):
         def post(self, path, body=None):
             return {"uploadUrl": server.url + "/session"}
 
-    assert chat_send.upload_file(N(), chat_send.Upload("big.mp4", io.BytesIO(b"x" * size), size, "video/mp4")) == {"id": "BIG"}
+    assert chat_send.upload_file(N(), Upload("big.mp4", io.BytesIO(b"x" * size), size, "video/mp4")) == {"id": "BIG"}
     puts = [s for s in server.seen if s["method"] == "PUT"]
     assert [len(p["body"]) for p in puts] == [chat_send.UPLOAD_CHUNK, size - chat_send.UPLOAD_CHUNK]
     assert puts[1]["headers"]["Content-Range"] == f"bytes {chat_send.UPLOAD_CHUNK}-{size - 1}/{size}"
@@ -148,7 +148,7 @@ def test_a_failed_upload_deletes_the_session_through_the_real_client(server, mon
     client = type("C", (), {"request": staticmethod(failing)})()
     monkeypatch.setattr(chat_send, "http_client", lambda: client)
     with pytest.raises(RuntimeError):
-        chat_send.upload_file(N(), chat_send.Upload("big.mp4", io.BytesIO(b"x" * size), size, "video/mp4"))
+        chat_send.upload_file(N(), Upload("big.mp4", io.BytesIO(b"x" * size), size, "video/mp4"))
     assert [s["method"] for s in server.seen] == ["DELETE"]
 
 
@@ -156,7 +156,7 @@ def test_a_failed_upload_deletes_the_session_through_the_real_client(server, mon
 
 
 def test_a_download_streams_chunk_by_chunk_instead_of_loading_the_file(server, fresh_download_client):
-    stream = outnote_client.stream_download(server.url + "/slow", 10 * CHUNK)
+    stream = http_clients.stream_download(server.url + "/slow", 10 * CHUNK)
     first = next(stream)  # the server holds the rest back until this arrives: a buffering client would hang here
     assert first and set(first) == {ord("a")} and len(first) <= CHUNK
     server.got_first.set()
@@ -165,16 +165,16 @@ def test_a_download_streams_chunk_by_chunk_instead_of_loading_the_file(server, f
 
 
 def test_a_download_stops_at_its_cap(server, fresh_download_client):
-    got = b"".join(outnote_client.stream_download(server.url + "/big", CHUNK))
+    got = b"".join(http_clients.stream_download(server.url + "/big", CHUNK))
     assert len(got) <= CHUNK
 
 
 def test_fetch_bytes_refuses_past_its_cap_and_does_not_follow_redirects(server, fresh_download_client, monkeypatch):
     monkeypatch.setattr(teams_files, "is_download_url", lambda url: True)
-    with pytest.raises(teams_files.FileFetchError) as big:
+    with pytest.raises(FileFetchError) as big:
         teams_files.fetch_bytes(server.url + "/big", CHUNK)
     assert big.value.status == 413
-    with pytest.raises(teams_files.FileFetchError) as moved:
+    with pytest.raises(FileFetchError) as moved:
         teams_files.fetch_bytes(server.url + "/redirect", CHUNK)
     assert moved.value.status == 502
     assert not any(s["path"] == "/landed" for s in server.seen)
@@ -182,20 +182,20 @@ def test_fetch_bytes_refuses_past_its_cap_and_does_not_follow_redirects(server, 
 
 def test_stream_download_can_refuse_redirects(server, fresh_download_client):
     with pytest.raises(Exception):
-        list(outnote_client.stream_download(server.url + "/redirect", CHUNK, follow_redirects=False))
+        list(http_clients.stream_download(server.url + "/redirect", CHUNK, follow_redirects=False))
     assert not any(s["path"] == "/landed" for s in server.seen)
 
 
 def test_the_shared_download_client_keeps_no_cookies_between_accounts(server, fresh_download_client):
-    list(outnote_client.stream_download(server.url + "/cookie", CHUNK))
-    list(outnote_client.stream_download(server.url + "/cookie", CHUNK))
+    list(http_clients.stream_download(server.url + "/cookie", CHUNK))
+    list(http_clients.stream_download(server.url + "/cookie", CHUNK))
     assert not any(s["headers"].get("Cookie") for s in server.seen)
-    assert outnote_client.download_client() is outnote_client.download_client()
+    assert http_clients.download_client() is http_clients.download_client()
 
 
 def test_the_onenote_resource_stays_capped_with_the_real_stream(server, fresh_download_client, monkeypatch):
     monkeypatch.setattr(onenote, "GRAPH", server.url + "/big")
-    with pytest.raises(onenote.ResourceTooLarge):
+    with pytest.raises(ResourceTooLarge):
         onenote.resource(lambda client: "bearer", "1-res", CHUNK)
     assert server.seen[0]["headers"]["Authorization"] == "Bearer bearer"
 
@@ -342,8 +342,8 @@ def test_native_copies_never_reach_a_response(monkeypatch):
 
 def test_strip_native_walks_tuples_and_leaves_other_values_alone():
     item, data = {"_native": 1, "a": 2}, b"bytes"
-    assert outnote_client.strip_native((item, data)) == ({"a": 2}, b"bytes")
-    assert outnote_client.strip_native(None) is None
+    assert AccountRunner.strip_native((item, data)) == ({"a": 2}, b"bytes")
+    assert AccountRunner.strip_native(None) is None
 
 
 # --- client reuse --------------------------------------------------------------------------------
