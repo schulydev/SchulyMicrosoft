@@ -1,0 +1,89 @@
+# Doc-sync workflow — COPY THIS INTO EACH SOURCE REPO at:
+#   .github/workflows/sync-docs.yml
+#
+# It runs in the SOURCE repo (Schuly, SchulyServer, ...). On a push to main that
+# touches docs/**, it copies that repo's docs into SchulyDocs/docs/<Repo>/, opens a PR
+# against SchulyDocs and auto-merges it (same pattern as the other org sync workflows).
+# Merging into SchulyDocs is what triggers the Cloudflare Pages rebuild.
+#
+# Token: uses the org-level secret MAIN_PUSH_TOKEN (already used by other cross-repo
+# sync workflows in this org) — no per-repo secret to create.
+#
+# The section title/order for this repo lives in SchulyDocs at
+# docs/.vitepress/config.mjs (the SECTIONS map). The copy below just mirrors this
+# repo's docs/ into the section folder.
+
+name: Sync docs to docs site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  sync:
+    name: Sync docs/ into SchulyDocs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v5
+        with:
+          path: source
+
+      - name: Checkout docs site
+        uses: actions/checkout@v5
+        with:
+          repository: schulydev/SchulyDocs
+          token: ${{ secrets.MAIN_PUSH_TOKEN }}
+          path: docs-site
+
+      - name: Copy docs into section
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY##*/}"
+          DEST="docs-site/docs/$REPO"
+          # Mirror this repo's docs/ into the section folder (section label/order
+          # live in SchulyDocs' docs/.vitepress/config.mjs, not here).
+          rm -rf "$DEST"
+          mkdir -p "$DEST"
+          cp -r source/docs/. "$DEST"/
+
+      - name: Configure git as the maintainer
+        working-directory: docs-site
+        run: |
+          git config user.name "PianoNic"
+          git config user.email "79938743+PianoNic@users.noreply.github.com"
+
+      - name: Open + merge sync PR
+        working-directory: docs-site
+        env:
+          GH_TOKEN: ${{ secrets.MAIN_PUSH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No doc changes to sync."
+            exit 0
+          fi
+          REPO="${GITHUB_REPOSITORY##*/}"
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          BRANCH="docs-sync/$REPO-$SHORT_SHA-${{ github.run_id }}"
+          git checkout -b "$BRANCH"
+          git add -A
+          git commit -m "Synced docs from $REPO@$SHORT_SHA"
+          git push origin "$BRANCH"
+          PR_URL=$(gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "Synced docs from $REPO@$SHORT_SHA" \
+            --body "Automated docs sync from ${{ github.repository }}@${{ github.sha }}." \
+            --label CI/CD)
+          gh pr merge "$PR_URL" --admin --squash --delete-branch
