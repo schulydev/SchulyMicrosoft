@@ -20,6 +20,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 from entrance import TokenError, http_client
 
+from src import outnote_client
 from src.account_cache import for_broker
 
 TEAMS_CLIENT = "1fec8e78-bce4-4aaf-ab1b-5451cc387264"  # Microsoft Teams, a FOCI family client
@@ -33,7 +34,8 @@ SESSION_RETRY = 600  # after a refused sign-in to Teams, the list stops asking f
 MAX_PICTURE_BYTES = 5 * 1024 * 1024
 LOOKUP_WORKERS = 8
 LOOKUP_BUDGET = 4.0  # seconds the chat list waits for uncached picture lookups
-_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
+_TIMEOUT = 15.0
+_STREAM_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 
 
 class ChatServiceError(RuntimeError):
@@ -121,7 +123,7 @@ def picture_url(broker, chat_id: str) -> str | None:
     if hit is not marker:
         return hit
     skype, service = _session(broker)
-    r = http_client().get(f"{service}/v1/users/ME/conversations/{quote(chat_id, safe='')}", params={"view": "msnp24Equivalent"}, headers={"Authentication": f"skypetoken={skype}"}, timeout=_TIMEOUT)
+    r = http_client().request("GET", f"{service}/v1/users/ME/conversations/{quote(chat_id, safe='')}?view=msnp24Equivalent", headers={"Authentication": f"skypetoken={skype}"}, timeout=_TIMEOUT)
     if r.status_code == 404:
         url = None
     elif r.status_code != 200:
@@ -152,7 +154,7 @@ def _download(broker, chat_id: str) -> bytes | None:
     if not url:
         return None
     skype, _ = _session(broker)
-    with http_client().stream("GET", url, headers={"Authorization": f"skype_token {skype}"}, timeout=_TIMEOUT, follow_redirects=False) as r:
+    with outnote_client.download_client().stream("GET", url, headers={"Authorization": f"skype_token {skype}"}, timeout=_STREAM_TIMEOUT, follow_redirects=False) as r:
         if r.status_code == 404:
             for_broker(broker).set(("chat_picture", chat_id), None, PICTURE_TTL)
             return None
@@ -218,7 +220,7 @@ def _custom_emoji(broker, document_id: str, animated: bool) -> bytes | None:
     if not base:
         raise ChatServiceError(404, "no media service for this account")
     url = f"{base}/v1/objects/{quote(document_id, safe='')}/views/{CUSTOM_EMOJI_VIEWS[animated]}"
-    with http_client().stream("GET", url, headers={"Authorization": f"skype_token {skype}"}, timeout=_TIMEOUT, follow_redirects=False) as r:
+    with outnote_client.download_client().stream("GET", url, headers={"Authorization": f"skype_token {skype}"}, timeout=_STREAM_TIMEOUT, follow_redirects=False) as r:
         if r.status_code == 404:
             return None
         if r.status_code != 200:

@@ -31,7 +31,6 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from entrance import http_client
-import httpx
 
 CDN_HOSTS = frozenset({"statics.teams.cdn.office.net", "teams.public.onecdn.static.microsoft"})
 ASSET_BASE = "https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons"
@@ -47,7 +46,7 @@ CATALOGUE_TTL = 24 * 3600
 MAX_LOCALES = 24
 MAX_METADATA_BYTES = 4 * 1024 * 1024
 MAX_PAGE_BYTES = 2 * 1024 * 1024
-FETCH_TIMEOUT = httpx.Timeout(8.0, connect=4.0)
+FETCH_TIMEOUT = 8.0
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 
 EMOJI_ID = re.compile(r"[a-z0-9_]{1,64}")
@@ -124,7 +123,7 @@ _version = {"value": os.getenv("TEAMS_EMOTICON_VERSION", DEFAULT_VERSION)}
 
 
 def _json(url: str):
-    r = http_client().get(url, timeout=FETCH_TIMEOUT)
+    r = http_client().request("GET", url, timeout=FETCH_TIMEOUT)
     if r.status_code == 404:
         return None
     if r.status_code != 200:
@@ -140,13 +139,13 @@ def _json(url: str):
 def _discover_version() -> str | None:
     """The asset version Teams' own web client is currently using (its config bundle names it), or None."""
     try:
-        page = http_client().get(TEAMS_PAGE, headers={"User-Agent": UA}, timeout=FETCH_TIMEOUT, follow_redirects=True)
+        page = http_client().request("GET", TEAMS_PAGE, headers={"User-Agent": UA}, timeout=FETCH_TIMEOUT, follow_redirects=True)
         if page.status_code != 200 or len(page.content) > MAX_PAGE_BYTES:
             return None
         m = re.search(r"//([\w.-]+)/teams-modular-packages/hashed-assets/(config-prod-[0-9a-f]+\.js)", page.text)
         if not m or m.group(1).lower() not in CDN_HOSTS:
             return None
-        bundle = http_client().get(f"https://{m.group(1).lower()}/teams-modular-packages/hashed-assets/{m.group(2)}", timeout=FETCH_TIMEOUT, follow_redirects=True)
+        bundle = http_client().request("GET", f"https://{m.group(1).lower()}/teams-modular-packages/hashed-assets/{m.group(2)}", timeout=FETCH_TIMEOUT, follow_redirects=True)
         if bundle.status_code != 200 or len(bundle.content) > 8 * MAX_PAGE_BYTES:
             return None
         v = re.search(r'emoticonAssetVersion:\[\{value:"([0-9a-f]{32})"', bundle.text)

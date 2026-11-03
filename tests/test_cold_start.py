@@ -1,18 +1,14 @@
-"""Cold start: one redeem for a burst, readiness while warming up, HTTP/1.1 clients, cached profile."""
+"""Cold start: one redeem for a burst, readiness while warming up, cached profile."""
 
 import asyncio
-import importlib
-import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-import entrance
 import pytest
-from entrance import _foci, _http
+from entrance import _foci
 from fastapi.testclient import TestClient
 
-import src
 from src import app as app_module
 from src import config, outnote_client
 from src.app import app
@@ -112,18 +108,3 @@ def test_ready_after_grace_period_even_if_warm_up_hangs(monkeypatch):
         assert client.get("/health/ready").status_code == 200
         release.set()
 
-
-def test_shared_clients_use_http1_by_default():
-    assert sys.modules.get("h2", "missing") is None
-    assert _http._http2() is False
-    assert outnote_client._http2() is False
-
-
-def test_ms_http2_opt_in_keeps_h2_importable(monkeypatch):
-    monkeypatch.setenv("MS_HTTP2", "1")
-    monkeypatch.setitem(sys.modules, "h2", None)
-    monkeypatch.delitem(sys.modules, "h2")
-    src._force_http1()
-    assert "h2" not in sys.modules or sys.modules["h2"] is not None
-    assert _http._http2() is True
-    assert outnote_client._http2() is True

@@ -13,6 +13,7 @@ import hmac
 import os
 import json
 import logging
+import math
 import posixpath
 import re
 import time
@@ -111,7 +112,10 @@ MAX_SUBJECT = 255
 MAX_BODY_BYTES = 1024 * 1024
 MAX_SEND_ATTACHMENT_BYTES = 3 * 1024 * 1024
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
+FOLDER_DETAIL = "That item is a folder, which has no content to download."
+DEFAULT_RETRY_AFTER = 30  # seconds, for a throttled call that named no wait
 # Field lists keep list responses small: no mail body in lists (the single-message route returns it), and no unused chat metadata.
+# Explicit, not OutNote's default list fields: the web's mail list shows `toRecipients`, which that default leaves out.
 MAIL_LIST_FIELDS = "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,flag,hasAttachments,importance,conversationId"
 CHAT_FIELDS = "id,topic,chatType,createdDateTime,lastUpdatedDateTime,webUrl,viewpoint"
 # Graph answers 500 when $select is set on chat messages, so they are fetched whole.
@@ -634,12 +638,12 @@ async def chat_file(chat_id: str, message_id: str, attachment_id: str, token: st
         ref = next((f for f in chat_html.reference_files(message) if f.get("id") == attachment_id), None)
         if ref is None:
             raise HTTPException(status_code=404, detail="File not found in the message.")
-        item = note.get(chat_read.drive_item_path(ref["contentUrl"], "name,size,file,@microsoft.graph.downloadUrl"))
+        item = note.get(chat_read.drive_item_path(ref["contentUrl"], "name,size,file,folder,@microsoft.graph.downloadUrl"))
+        if item.get("folder") is not None:
+            raise HTTPException(status_code=404, detail=FOLDER_DETAIL)
         if (item.get("size") or 0) > MAX_CHAT_FILE_BYTES:
             raise HTTPException(status_code=413, detail="The file is larger than 100 MB.")
-        url = teams_files.download_url(note, f"shares/{chat_read.share_id(ref['contentUrl'])}/driveItem", item)
-        if not url:
-            raise HTTPException(status_code=502, detail="Microsoft did not offer a download link for this file.")
+        url = _download_link(note, f"shares/{chat_read.share_id(ref['contentUrl'])}/driveItem", item)
         return item, url
 
     carrier = Response()
@@ -766,6 +770,28 @@ async def convert_pdf(request: Request, token: str = Header(..., alias=config.RE
     return await _pdf(token, lambda note, broker: (safe, _converted(lambda: file_pdf.bytes_pdf(note, broker, data, safe))))
 
 
+def _check_file(item: dict):
+    if isinstance(item, dict) and item.get("folder") is not None:
+        raise HTTPException(status_code=404, detail=FOLDER_DETAIL)
+    if not isinstance(item, dict) or item.get("file") is None:
+        raise HTTPException(status_code=404, detail="File not found.")
+
+
+def _download_link(note, path: str, item: dict) -> str:
+    """The item's download link, with Graph's refusal as a status of its own. A 404 and a 429 are answered by `_read`."""
+    try:
+        url = teams_files.download_url(note, path, item)
+    except GraphError as ex:
+        if ex.status == 403:
+            raise HTTPException(status_code=403, detail="Microsoft 365 refused access to this file.")
+        if ex.status in (406, 415):
+            raise HTTPException(status_code=415, detail="Microsoft 365 cannot serve this file.")
+        raise
+    if not url:
+        raise HTTPException(status_code=502, detail="Microsoft did not offer a download link for this file.")
+    return url
+
+
 def _check_source(item: dict):
     if not isinstance(item, dict) or item.get("file") is None:
         raise HTTPException(status_code=404, detail="File not found.")
@@ -881,14 +907,11 @@ async def drive_item_content(drive_id: str, item_id: str, token: str = Header(..
     _check_id(item_id, DRIVE_ITEM_PATTERN, "item_id")
 
     def resolve(note):
-        item = note.get(teams_files.item_base(drive_id, item_id), {"$select": "id,name,size,file,@microsoft.graph.downloadUrl"})
-        if not isinstance(item, dict) or item.get("file") is None:
-            raise HTTPException(status_code=404, detail="File not found.")
+        item = note.get(teams_files.item_base(drive_id, item_id), {"$select": "id,name,size,file,folder,@microsoft.graph.downloadUrl"})
+        _check_file(item)
         if (item.get("size") or 0) > teams_files.MAX_DOWNLOAD_BYTES:
             raise HTTPException(status_code=413, detail="The file is larger than 100 MB.")
-        url = teams_files.download_url(note, teams_files.item_base(drive_id, item_id), item)
-        if not url:
-            raise HTTPException(status_code=502, detail="Microsoft did not offer a download link for this file.")
+        url = _download_link(note, teams_files.item_base(drive_id, item_id), item)
         if not teams_files.is_download_url(url):
             raise HTTPException(status_code=502, detail="The file has an unexpected download location.")
         return item, url
@@ -918,9 +941,8 @@ async def shared_drive_item_pdf(drive_id: str, item_id: str, token: str = Header
 
 
 def _file_text(note, drive_id: str | None, item_id: str, offset: int, max_chars: int, sheet: str | None, row_offset: int, max_rows: int) -> dict:
-    item = note.get(teams_files.item_base(drive_id, item_id), {"$select": "id,name,size,file,@microsoft.graph.downloadUrl"})
-    if not isinstance(item, dict) or item.get("file") is None:
-        raise HTTPException(status_code=404, detail="File not found.")
+    item = note.get(teams_files.item_base(drive_id, item_id), {"$select": "id,name,size,file,folder,@microsoft.graph.downloadUrl"})
+    _check_file(item)
     name = item.get("name") or ""
     kind = file_text.kind_of(name)
     if kind is None:
@@ -938,9 +960,7 @@ def _file_text(note, drive_id: str | None, item_id: str, offset: int, max_chars:
             name = posixpath.splitext(name)[0] + ".pdf"
             notes.append("Converted to PDF by Microsoft 365 before reading.")
         else:
-            url = teams_files.download_url(note, teams_files.item_base(drive_id, item_id), item)
-            if not url:
-                raise HTTPException(status_code=502, detail="Microsoft did not offer a download link for this file.")
+            url = _download_link(note, teams_files.item_base(drive_id, item_id), item)
             data = teams_files.fetch_bytes(url, file_text.MAX_SOURCE_BYTES)
         result = file_text.extract(name, data, offset, max_chars, sheet, row_offset, max_rows, notes)
     except file_text.TextError as ex:
@@ -1289,8 +1309,8 @@ async def people_photo(email: str = Query(..., max_length=254), token: str = Hea
     def fetch(note, broker):
         try:
             return people_photos.photo(note, broker, email, size)
-        except people_photos.Throttled:
-            raise HTTPException(status_code=429, detail="Microsoft is throttling photo requests.", headers={"Retry-After": "30"})
+        except people_photos.Throttled as ex:
+            raise HTTPException(status_code=429, detail="Microsoft is throttling photo requests.", headers={"Retry-After": _retry_after(ex.retry_after)})
 
     carrier = Response()
     data = await _read(carrier, token, fetch, with_broker=True)
@@ -1350,11 +1370,22 @@ async def _read(response: Response, refresh_token: str, action: Callable[..., ob
             raise HTTPException(status_code=401, detail="The Microsoft sign-in expired; reconnect the account.")
         if isinstance(ex, GraphError) and ex.status == 404:
             raise HTTPException(status_code=404, detail="Not found in Microsoft 365.")
+        if isinstance(ex, GraphError) and ex.status == 429:
+            # OutNote already waited about 60 s. The token may have rotated first; keep it for the caller.
+            headers = {"Retry-After": _retry_after(ex.retry_after)}
+            if broker.refresh_token and broker.refresh_token != refresh_token:
+                headers[config.REFRESH_TOKEN_HEADER] = broker.refresh_token
+            raise HTTPException(status_code=429, detail="Microsoft is throttling this account; try again later.", headers=headers)
         raise HTTPException(status_code=502, detail=f"Microsoft Graph error: {ex}")
     # Hand back the rotated refresh token so the caller can persist it.
     if broker.refresh_token and broker.refresh_token != refresh_token:
         response.headers[config.REFRESH_TOKEN_HEADER] = broker.refresh_token
-    return data
+    return outnote_client.strip_native(data)
+
+
+def _retry_after(seconds: float | None) -> str:
+    """Whole seconds for a Retry-After header; Graph's value when it gave one."""
+    return str(max(1, math.ceil(seconds))) if seconds else str(DEFAULT_RETRY_AFTER)
 
 
 async def _no_content(token: str, action: Callable[[object], object]):

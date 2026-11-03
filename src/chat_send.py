@@ -175,7 +175,7 @@ def upload_file(note, upload: Upload) -> dict:
             if not chunk:
                 raise SendError(400, "The file ended before its declared size.")
             # The session URL is pre-authorized; it must not carry the Graph bearer token.
-            r = client.put(url, content=chunk, headers={"Content-Length": str(len(chunk)), "Content-Range": f"bytes {sent}-{sent + len(chunk) - 1}/{upload.size}"}, timeout=120)
+            r = client.request("PUT", url, content=chunk, headers={"Content-Length": str(len(chunk)), "Content-Range": f"bytes {sent}-{sent + len(chunk) - 1}/{upload.size}"}, timeout=120)
             if r.status_code >= 400:
                 raise SendError(502, f"OneDrive refused the upload ({r.status_code}).")
             sent += len(chunk)
@@ -183,7 +183,7 @@ def upload_file(note, upload: Upload) -> dict:
                 item = r.json()
     except BaseException:
         try:
-            client.delete(url, timeout=15)
+            client.request("DELETE", url, timeout=15)
         except Exception:
             pass
         raise

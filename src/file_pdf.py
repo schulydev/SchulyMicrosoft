@@ -18,10 +18,10 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlsplit
 
-import entrance
 import httpx
 from outnote import GraphError
 
+from src import outnote_client
 from src.account_cache import for_broker
 
 log = logging.getLogger("schuly.microsoft")
@@ -84,7 +84,7 @@ def fetch_pdf(url: str):
         raise ConvertError(502, "The conversion answered with an unexpected location.")
     out = tempfile.SpooledTemporaryFile(max_size=SPOOL_IN_MEMORY)
     try:
-        with entrance.http_client().stream("GET", url, timeout=FETCH_TIMEOUT, follow_redirects=False) as r:
+        with outnote_client.download_client().stream("GET", url, timeout=FETCH_TIMEOUT, follow_redirects=False) as r:
             if r.status_code != 200:
                 raise ConvertError(502, f"The conversion failed ({r.status_code}).")
             size = 0

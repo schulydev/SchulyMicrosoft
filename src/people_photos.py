@@ -18,7 +18,9 @@ MAX_CACHED_BYTES = 200 * 1024
 
 
 class Throttled(RuntimeError):
-    pass
+    def __init__(self, retry_after: float | None = None):
+        self.retry_after = retry_after
+        super().__init__("throttled")
 
 
 def _odata_string(value: str) -> str:
@@ -32,7 +34,7 @@ def _first(note, user: str, size: int) -> bytes | None:
             return note.get(path, raw="bytes")
         except GraphError as ex:
             if ex.status == 429:
-                raise Throttled() from None
+                raise Throttled(ex.retry_after) from None
             if ex.status not in (400, 404):
                 raise
     return None
@@ -43,7 +45,7 @@ def _resolve(note, email: str) -> str | None:
         found = note.list("users", {"$filter": f"mail eq '{_odata_string(email)}'", "$select": "id", "$top": 1}, limit=1)
     except GraphError as ex:
         if ex.status == 429:
-            raise Throttled() from None
+            raise Throttled(ex.retry_after) from None
         if ex.status in (400, 403, 404):
             return None
         raise

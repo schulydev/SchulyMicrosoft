@@ -104,7 +104,7 @@ def env(monkeypatch):
     note = Note(broker)
     http = Http()
     monkeypatch.setattr(outnote_client, "build_client", lambda frt: (note, broker))
-    monkeypatch.setattr(file_pdf.entrance, "http_client", lambda: http)
+    monkeypatch.setattr(outnote_client, "download_client", lambda: http)
     return note, http, TestClient(app)
 
 

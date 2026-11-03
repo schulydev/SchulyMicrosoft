@@ -13,8 +13,7 @@ import binascii
 import json
 import logging
 
-import httpx
-from entrance import http_client
+from entrance import HTTPError, http_client
 from outnote import C_OFFICE, GraphError
 
 from src.account_cache import for_broker
@@ -25,7 +24,7 @@ CACHE_KEY = "me_profile"
 TTL = 3600.0
 CLAIMS_TTL = 300.0
 ME_URL = "https://graph.microsoft.com/v1.0/me"
-ME_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+ME_TIMEOUT = 10.0
 
 
 def get(note, broker) -> dict:
@@ -45,12 +44,12 @@ def _fetch(note, broker) -> tuple[dict, float]:
     token = broker(C_OFFICE)
     status = None
     try:
-        r = http_client().get(ME_URL, headers={"Authorization": f"Bearer {token}"}, timeout=ME_TIMEOUT)
+        r = http_client().request("GET", ME_URL, headers={"Authorization": f"Bearer {token}"}, timeout=ME_TIMEOUT)
         status = r.status_code
         if status == 200:
             return r.json(), TTL
         log.info("/me answered %s (Retry-After %s); using the token's claims", status, r.headers.get("Retry-After"))
-    except (httpx.HTTPError, ValueError) as ex:
+    except (*HTTPError, ValueError) as ex:  # entrance's HTTPError is a tuple, so it is unpacked
         log.info("/me failed (%s); using the token's claims", type(ex).__name__)
     claims = from_claims(token)
     if claims is None:
