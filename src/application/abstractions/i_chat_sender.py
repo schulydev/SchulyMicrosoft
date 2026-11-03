@@ -11,6 +11,9 @@ class IChatSender(ABC):
     SELF_CHAT: str
 
     @abstractmethod
+    def chat_members(self, note: IGraphClient, chat_id: str) -> list[dict]: ...
+
+    @abstractmethod
     def validate(self, msg: OutgoingMessage) -> OutgoingMessage: ...
 
     @abstractmethod
