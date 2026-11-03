@@ -15,7 +15,7 @@ The Schuly **Microsoft plugin** is the only caller.
   once for the push/TOTP sign-in, holds it only in memory for that call, and never stores, caches,
   logs or returns it. Every other route still never sees a password. Do **not** add any other
   password/credential endpoints.
-- Password sign-in jobs (`src/password_signin.py`) are **in memory only** (TTL <= 10 min, sweeper,
+- Password sign-in jobs (`src/infrastructure/password_signin/`) are **in memory only** (TTL <= 10 min, sweeper,
   max concurrent jobs, per-client and per-account rate limits). They hold progress and the result,
   never the password, so the service **must run as ONE process** (`asgi.py` pins `workers=1`; do not
   add uvicorn/gunicorn workers or replicas). Keep the password out of logs, job objects, errors
@@ -23,30 +23,30 @@ The Schuly **Microsoft plugin** is the only caller.
 - Uses only the **public** OutNote/Entrance API (`outnote.OutNote`, `entrance.Broker`,
   `entrance.http_client`) plus the documented OAuth calls for the browser and device flows. Don't
   reach into their private modules. Needs Python 3.11 or newer. The one non-Graph surface is the Teams chat service for group
-  chat pictures (`teams_chat.py`): a Teams-client token for `api.spaces.skype.com` is traded at
+  chat pictures (`TeamsChatClient`): a Teams-client token for `api.spaces.skype.com` is traded at
   `teams.microsoft.com/api/authsvc/v1.0/authz` for a skype token.
 
 ## OutNote / Entrance 2.x
 
 - `entrance.http_client()` offers only `request`, `post`, `head` and `close`, takes a float timeout
   and reads every body into memory. Anything that must stay capped or be streamed uses
-  `outnote_client.download_client()` (httpx, HTTP/1.1, no redirects by default, no cookies kept,
+  `IMicrosoftHttpClients.download_client()` (httpx, HTTP/1.1, no redirects by default, no cookies kept,
   because all accounts share it). Don't call `note.download` or `note.download_shared`: they hold the
   whole file with no cap and no host check.
 - `except entrance.HTTPError` works alone, but it is a tuple: unpack it next to other types.
-- `teams_files.download_url` stays: it serves the `shares/...` path chat files need, which OutNote's
+- `TeamsFiles.download_url` stays: it serves the `shares/...` path chat files need, which OutNote's
   `download_url` can't. A folder is a 404 that says so; Graph's refusal at `/content` keeps its own
   status (403, 404, 415, 429).
 - One `OutNote` per account lives on its broker. A throttled call raises `GraphError` 429 after about
-  60 s, which `_read` answers as 429 with `Retry-After` (and any rotated token).
-- `_read` strips `_native` from every result. No route calls OutNote's native reads today: chat
-  messages stay on Graph's list because `chat_read` and the callers need its attachments, mentions and
+  60 s, which `AccountRunner` answers as 429 with `Retry-After` (and any rotated token).
+- `AccountRunner` strips `_native` from every result. No route calls OutNote's native reads today: chat
+  messages stay on Graph's list because `ChatReader` and the callers need its attachments, mentions and
   reactions. `emails()` gets an explicit `$select` because the web's list shows `toRecipients`.
 - Never add `SQLiteCache` or any other on-disk cache. `stream()` cursors would have to live in the plugin.
 
 ## Cold start
 
-- Read `/me` only through `profile.get`: it asks `/me` once without OutNote's retries (Graph 429s it with ~21 s Retry-After) and falls back to the access token's claims (oid, name, upn).
+- Read `/me` only through `IProfileReader.get`: it asks `/me` once without OutNote's retries (Graph 429s it with ~21 s Retry-After) and falls back to the access token's claims (oid, name, upn).
 - `GET /health/live` is always 200; `GET /health/ready` is 503 until the startup warm-up finished or 15 s passed
   (the Dockerfile `HEALTHCHECK` uses it).
 
@@ -56,36 +56,62 @@ The Schuly **Microsoft plugin** is the only caller.
 across multiple lines, however long. Call sites, comprehensions and multi-line `if`/`for`
 stay as they are.
 
+## Architecture
+
+Onion clean architecture with CQRS through [mediatorx](https://pypi.org/project/mediatorx/), in SchulwareAPI's style and with SchulyServer's ideas.
+**Dependencies only point inward**; `tests/test_architecture.py` parses every import under `src/` and fails when a file breaks this.
+
+- `domain`: pure types, errors and validators. Imports nothing from the other rings and no framework.
+- `application`: commands, queries, DTOs, options, services, and the ABCs it needs from outside (`abstractions/`). Imports only `domain` (plus `mediatorx` and `pydantic`), never FastAPI, OutNote, Entrance or httpx.
+- `infrastructure`: implements those ABCs over OutNote, Entrance, Graph, Teams, Giphy and the file libraries. Never imports `api`.
+- `api`: controllers, middleware and the composition root. Only `src/api/extensions/` may name concrete infrastructure classes.
+
+Conventions:
+
+- **Controllers are thin**: `@controller(router)` classes with `mediator: Mediator = Depends(get_mediator)` that translate HTTP and call `self.mediator.send(...)`. Route method names are the operation ids, so keep them; `OpenApiExtensions` strips the class name the decorator adds.
+- **A command or query** is a dataclass paired with its handler in one file, one file per operation. A refresh token field is `field(repr=False)`, and so is anything else secret.
+- **Constructor injection only**: nothing is reached through a module-level singleton. `ServiceCollection` holds the lifetimes (`add_singleton`, `add_scoped`, `add_handler`), one `<Area>Extensions` class per area, called from `Program` in `src/api/app.py`. Handlers are scoped; everything with state is a singleton: `JobStore`, `OutNoteClientFactory` (the per-account broker cache), `MicrosoftHttpClients`, `EmojiCatalogue`, `GifSearch`, `WarmUpTracker`.
+- **Refusals**: raise `ServiceError(status, detail, headers)` or a subclass from anywhere; `ExceptionHandlingExtensions` is the one place that makes a response from it. `SignInRefused` is the password routes' shape, and they alone get the stripped 422.
+- **Token rotation**: `AccountRunner` records the rotated token through `ITokenRotation`; `TokenRotationMiddleware` puts it on the response. It records on success, on a `ServiceError` raised by the action and on a 429, and not on a plain 401, 404 or 502. mediatorx has pipeline behaviors, but a behavior can't see the broker.
+
+To add a route: a query or command with its handler in `src/application/`, its registration in the area's `src/api/extensions/<area>_extensions.py`, and a method on `src/api/controllers/<area>_controller.py`. A streaming answer returns a `FileStream` and the controller answers `FileResponses.stream(...)`.
+
 ## Layout
 
 ```
-asgi.py                 # entrypoint (uvicorn on :8010)
+asgi.py                       # entrypoint (uvicorn on :8010)
 src/
-  app.py                # FastAPI app + routes
-  config.py             # client ids, scopes, endpoints
-  browser_auth.py       # browser sign-in (authorize URL + PKCE, code exchange)
-  password_signin.py    # password sign-in jobs (worker thread per job, MfaPrompt bridge, rate limits)
-  outnote_client.py     # thin OutNote/Entrance wrapper (device start/poll, build_client)
-  models.py             # pydantic DTOs
-  account_cache.py      # per-account TTL cache living on the shared broker
-  profile.py            # the user's /me profile: one try, token claims on 429; cached 1 h (claims 5 min)
-  folder_roles.py       # well-known mail folder names via one $batch
-  teams_chat.py         # group chat pictures over the Teams chat service (skype token, AMS)
-  chat_read.py          # chat messages + media/files/cards for the web
-  chat_html.py          # composer HTML allowlist sanitizer, body media/card extraction
-  chat_send.py          # rich sends: hosted images, GIFs, mentions, OneDrive file shares
-  people_photos.py      # profile photos by e-mail (mail senders), cached per account
-  emojis.py             # Teams emoji catalogue (public CDN, 24 h cache), message emoji parsing, send allowlist
-  file_thumbs.py        # file kinds, SharePoint/OneDrive host check, chat file and drive thumbnails
-  file_pdf.py           # Office files as PDF (Graph format=pdf); temp app-folder upload + delete + hourly sweep, converted-host allowlist
-  teams_files.py        # joined teams, channels, team/channel library browsing (drive id via C_SITES), drive items, shared/recent files, download host check
-  search.py             # Search API (files / mail / chats / channel posts) with hit locations, per-drive fallback, per-source errors; never logs the query
-  file_text.py          # text out of docx/xlsx/pptx/pdf/text (lazy imports, zip-bomb guard, caps, paging)
-  channel_messages.py   # Teams channel posts and replies, normalized (html to text)
-  gifs.py               # Giphy search (needs GIPHY_API_KEY; 503 without)
-  onenote.py            # OneNote over Graph: notebooks (own + teams), section tree, pages, search, writes, resource stream
-  onenote_html.py       # OneNote page HTML allowlist sanitizer (read and write), text-box editability, InkML to SVG
-tests/                  # pytest, fully mocked (no network)
+  api/
+    app.py                    # Program: the composition root and the request pipeline
+    controller.py             # class-based controller decorator (vendored, MIT, from SchulwareAPI)
+    dependencies.py           # get_mediator, the password routes' service key and user id gate
+    http_headers.py           # header names
+    controllers/              # one @controller class per area
+    extensions/               # <Area>Extensions (registration per area), exception handling, OpenAPI names
+    di/                       # ServiceCollection, ServiceProvider (mediatorx's resolver)
+    middleware/               # TokenRotationMiddleware
+    token_rotation/           # ContextTokenRotation: the per-request slot behind ITokenRotation
+    request_bodies/           # capped raw upload body, chat send body (JSON or multipart)
+    responses/                # FileResponses: download, stream, inline PDF and image headers
+  application/
+    abstractions/             # I*: what the application needs from outside
+    commands/ queries/        # one dataclass + handler per operation
+    dtos/                     # pydantic request and response models, one per file
+    options/                  # MicrosoftOptions, ServiceAuthOptions, PasswordSignInOptions, GiphyOptions, EmojiOptions
+    services/                 # ChatHtmlSanitizer, OneNoteHtmlSanitizer, MailMessageBuilder, DriveFileTextReader, PasswordSignInResponder, ApplicationLifetime, WarmUpTracker, ...
+  domain/
+    errors/                   # ServiceError and its subclasses, SignInRefused, RateLimited, ...
+    validation/               # GraphIds (the one id validator), RefreshTokenFormat
+    files/ chat/ sign_in/     # limits, file results, outgoing message, emoji catalogue, sign-in states
+  infrastructure/
+    logging_config.py         # logger names
+    microsoft/                # AccountRunner, OutNoteClientFactory, BrokerCache, SharedBroker, AccountCache, MicrosoftHttpClients, DeviceLoginClient, BrowserSignInClient, ProfileReader
+    graph/                    # TeamsFiles, GraphSearch, OneNoteClient, OneNoteRunner, PdfConverter, FileThumbnails, ChannelMessages, PeoplePhotos, MailFolderRoles
+    teams/                    # TeamsChatClient (skype token, AMS), ChatReader, ChatSender, EmojiCatalogue
+    giphy/                    # GifSearch (needs GIPHY_API_KEY; 503 without)
+    files/                    # FileTextExtractor (lazy imports, zip-bomb guard, caps, paging)
+    password_signin/          # JobStore, SignInJob (worker thread per job, MfaPrompt bridge), RateLimiter
+tests/                        # pytest, fully mocked (no network); services.py resolves the singletons the tests patch
 ```
 
 ## Run / test
