@@ -8,6 +8,7 @@ Without one the search answers 503.
 
 import os
 import time
+from urllib.parse import urlencode
 
 from entrance import http_client
 
@@ -84,7 +85,7 @@ def _search(key: str, query: str | None, limit: int) -> list[dict]:
     params = {"api_key": key, "limit": max(1, min(limit, MAX_LIMIT)), "rating": RATING}
     if query:
         params["q"] = query
-    r = http_client().get(f"{API}/{'search' if query else 'trending'}", params=params, timeout=15)
+    r = http_client().request("GET", f"{API}/{'search' if query else 'trending'}?{urlencode(params)}", timeout=15)
     if r.status_code != 200:
         raise RuntimeError(f"Giphy answered {r.status_code}")
     return [g for g in (_shape(i) for i in r.json().get("data") or []) if g]

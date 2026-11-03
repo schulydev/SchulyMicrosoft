@@ -5,6 +5,7 @@ import json
 import time
 
 import httpx
+import wreq.exceptions
 import pytest
 
 from src import profile
@@ -40,7 +41,7 @@ class Http:
         self.answers = list(answers)
         self.calls = []
 
-    def get(self, url, headers=None, timeout=None):
+    def request(self, method, url, headers=None, timeout=None):
         self.calls.append((url, headers))
         answer = self.answers.pop(0)
         if isinstance(answer, Exception):
@@ -90,7 +91,7 @@ def test_a_claims_profile_is_kept_briefly_then_me_is_asked_again(real, monkeypat
 
 
 def test_a_network_failure_also_uses_the_claims(real):
-    real(httpx.ConnectTimeout("slow"))
+    real(wreq.exceptions.TimeoutError("slow"))
     assert profile.get(Note(), Broker())["id"] == "oid-1"
 
 

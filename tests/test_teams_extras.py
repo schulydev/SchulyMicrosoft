@@ -143,7 +143,7 @@ class FakeHttp:
         self.calls.append(("post", url))
         return FakeResponse(200, {"tokens": {"skypeToken": "skype", "expiresIn": 4000}, "regionGtms": {"chatService": "https://ch.ng.msg.teams.microsoft.com"}})
 
-    def get(self, url, params=None, headers=None, timeout=None):
+    def request(self, method, url, headers=None, timeout=None):
         self.calls.append(("get", url, headers))
         if "unknown" in url:
             return FakeResponse(404)
@@ -158,6 +158,7 @@ class FakeHttp:
 def http(monkeypatch):
     fake = FakeHttp()
     monkeypatch.setattr(teams_chat, "http_client", lambda: fake)
+    monkeypatch.setattr(outnote_client, "download_client", lambda: fake)
     return fake
 
 
@@ -301,7 +302,8 @@ def test_large_files_go_through_an_upload_session_in_320k_multiples(monkeypatch)
         def __init__(self):
             self.puts = []
 
-        def put(self, url, content=None, headers=None, timeout=None):
+        def request(self, method, url, content=None, headers=None, timeout=None):
+            assert method == "PUT"
             self.puts.append((len(content), headers["Content-Range"]))
             done = sum(n for n, _ in self.puts) == size
             return FakeResponse(201 if done else 202, {"id": "BIG"} if done else {})
@@ -369,9 +371,9 @@ def test_gif_search_returns_only_giphy_urls(env, monkeypatch):
     calls = []
 
     class Http:
-        def get(self, url, params=None, timeout=None):
+        def request(self, method, url, timeout=None):
             calls.append(url)
-            assert url.endswith("/search") and params["q"] == "cat"
+            assert method == "GET" and "/search?" in url and "q=cat" in url
             return FakeResponse(200, {"data": [{"id": "g1", "title": "Cat", "images": {"downsized_medium": {"url": GIF_URL + "?cid=1", "width": "200", "height": "150"}, "fixed_width_small": {"url": GIF_URL}}}, {"id": "bad", "images": {"original": {"url": "https://evil.example/x.gif"}}}]})
 
     monkeypatch.setenv("GIPHY_API_KEY", "k")

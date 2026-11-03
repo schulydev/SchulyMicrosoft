@@ -46,7 +46,7 @@ class Cdn:
         self.missing = set()
         self.fail = False
 
-    def get(self, url, headers=None, timeout=None, follow_redirects=None):
+    def request(self, method, url, headers=None, timeout=None, follow_redirects=None):
         self.urls.append(url)
         if self.fail:
             return Resp(500)
@@ -167,8 +167,8 @@ def test_catalogue_rediscovers_a_rotated_asset_version(cdn, monkeypatch):
     new = "a" * 32
     monkeypatch.setattr(emojis, "_discover_version", lambda: new)
     monkeypatch.setitem(emojis._version, "value", "b" * 32)
-    real = cdn.get
-    cdn.get = lambda url, headers=None, timeout=None, follow_redirects=None: Resp(404, text="x") if "/" + "b" * 32 + "/" in url else real(url)
+    real = cdn.request
+    cdn.request = lambda method, url, headers=None, timeout=None, follow_redirects=None: Resp(404, text="x") if "/" + "b" * 32 + "/" in url else real(method, url)
     assert emojis.catalogue("default").version == new
 
 
@@ -234,6 +234,7 @@ class AmsHttp:
 def ams(account, monkeypatch):
     fake = AmsHttp()
     monkeypatch.setattr(teams_chat, "http_client", lambda: fake)
+    monkeypatch.setattr(outnote_client, "download_client", lambda: fake)
     return fake
 
 

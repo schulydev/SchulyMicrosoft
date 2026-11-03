@@ -12,16 +12,18 @@ enough already. Any write drops them.
 """
 
 import html
+import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 import httpx
-from entrance import http_client
 from outnote import C_ONENOTE, GraphError
 
-from src import onenote_html
+from src import onenote_html, outnote_client
 from src.account_cache import for_broker
+
+log = logging.getLogger("schuly.microsoft")
 
 ID_PATTERN = re.compile(r"[A-Za-z0-9!@_{}:.\-]{1,300}")
 GRAPH_ID = re.compile(r"[A-Za-z0-9!_{}:.\-]{1,200}")
@@ -142,6 +144,20 @@ def _notebook(group, team_name, n) -> dict:
     }
 
 
+def _team_pages(note, joined: list[dict]) -> list[list[dict] | None]:
+    """Each team's notebooks through `$batch`: `[]` for a team Graph refused, None for one to ask on its own (the batch failed, or the answer has more pages)."""
+    if not joined:
+        return []
+    try:
+        answers = note.batch([f"{root(t['id'])}/notebooks?$select={NOTEBOOK_FIELDS}" for t in joined], client=C_ONENOTE)
+    except (GraphError, OSError) as ex:
+        if getattr(ex, "status", None) == 429:
+            raise
+        log.info("onenote: notebook batch failed: %s", type(ex).__name__)
+        return [None] * len(joined)
+    return [[] if isinstance(a, GraphError) else a.get("value", []) if isinstance(a, dict) and "@odata.nextLink" not in a else None for a in answers]
+
+
 def notebooks(note, broker, teams: bool = True) -> list[dict]:
     def make():
         own = note.list(f"{root(None)}/notebooks", {"$select": NOTEBOOK_FIELDS}, limit=500, client=C_ONENOTE)
@@ -151,17 +167,19 @@ def notebooks(note, broker, teams: bool = True) -> list[dict]:
             return out
         joined = _teams(note, broker)
 
-        def team_books(team):
+        def team_books(team, rows):
             try:
-                rows = note.list(f"{root(team['id'])}/notebooks", {"$select": NOTEBOOK_FIELDS}, limit=200, client=C_ONENOTE)
+                if rows is None:
+                    rows = note.list(f"{root(team['id'])}/notebooks", {"$select": NOTEBOOK_FIELDS}, limit=200, client=C_ONENOTE)
             except GraphError:
                 # A team whose notebooks cannot be listed is somewhere the person has no notebook to open.
                 return []
             return [_notebook(team["id"], team["name"], n) for n in rows if GRAPH_ID.fullmatch(str(n.get("id", "")))]
 
-        # A few at a time: OneNote answers a burst of requests from one person with a wait.
+        pages = _team_pages(note, joined)
+        # Only what the batch left open goes one by one, a few at a time: OneNote answers a burst of requests from one person with a wait.
         with ThreadPoolExecutor(max_workers=TEAM_WORKERS) as pool:
-            found = list(pool.map(team_books, joined))
+            found = list(pool.map(team_books, joined, pages))
         for team, rows in sorted(zip(joined, found), key=lambda pair: (pair[0]["name"] or "").lower()):
             out.extend(sorted(rows, key=lambda n: n["displayName"].lower()))
         return out
@@ -357,7 +375,7 @@ def resource(broker, resource_scoped: str, limit: int) -> bytes:
     for attempt in range(RESOURCE_RETRIES + 1):
         headers = {"Authorization": f"Bearer {broker(C_ONENOTE)}"}
         # No redirects: the bearer token must never follow a response to another host.
-        with http_client().stream("GET", url, headers=headers, timeout=httpx.Timeout(60.0, connect=5.0), follow_redirects=False) as r:
+        with outnote_client.download_client().stream("GET", url, headers=headers, timeout=httpx.Timeout(60.0, connect=5.0), follow_redirects=False) as r:
             if r.status_code in (429, 503) and attempt < RESOURCE_RETRIES:
                 wait = r.headers.get("Retry-After", "")
                 time.sleep(min(6.0, float(wait)) if wait.isdigit() else 1.0 + attempt)

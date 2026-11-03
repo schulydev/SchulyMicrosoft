@@ -8,10 +8,10 @@ carries `parentReference.driveId` so the caller can address it again.
 import re
 from urllib.parse import quote, urlsplit
 
-import entrance
 import httpx
 from outnote import C_SITES, GraphError
 
+from src import outnote_client
 from src.account_cache import for_broker
 
 LIST_TTL = 600
@@ -66,7 +66,7 @@ def fetch_bytes(url: str, cap: int) -> bytes:
     if not is_download_url(url):
         raise FileFetchError(502, "The file has an unexpected download location.")
     out = bytearray()
-    with entrance.http_client().stream("GET", url, timeout=FETCH_TIMEOUT, follow_redirects=False) as r:
+    with outnote_client.download_client().stream("GET", url, timeout=FETCH_TIMEOUT, follow_redirects=False) as r:
         if r.status_code != 200:
             raise FileFetchError(502, f"The download failed ({r.status_code}).")
         for chunk in r.iter_bytes(64 * 1024):
@@ -77,7 +77,9 @@ def fetch_bytes(url: str, cap: int) -> bytes:
 
 
 def download_url(note, path: str, item: dict) -> str | None:
-    """The pre-authorized link of the item at `path`. Graph can leave it out of a `$select` answer, so ask again without one, then through `/content`."""
+    """The pre-authorized link of the item at `path`, or None when `/content` answers without a redirect. Graph can leave it out of a `$select` answer, so ask again without one, then through `/content`; a refusal there is raised.
+
+    OutNote 2.0.1's `download_url` has the same fallback but can't take the `shares/...` path chat files need and always asks Graph again, and its `download` holds the whole file in memory with no cap."""
     url = item.get("@microsoft.graph.downloadUrl")
     if url:
         return url
@@ -87,7 +89,9 @@ def download_url(note, path: str, item: dict) -> str | None:
         return url
     try:
         return note.redirect(f"{path}/content")
-    except GraphError:
+    except GraphError as ex:
+        if ex.status >= 400:
+            raise
         return None
 
 

@@ -114,7 +114,16 @@ GET  /api/emojis/catalogue?locale=  Teams emoji catalogue (no token, cached 24 h
 GET  /api/emojis/custom/{documentId}?animated=  tenant custom emoji image (message emojis[].documentId)
 ```
 
+## Errors
+
+When Microsoft keeps throttling a call, the service answers `429` with a `Retry-After` header in
+seconds, after waiting about 60 seconds itself. A rotated refresh token still comes back on that answer.
+On the file routes, a folder is a `404` that says so, and a file Microsoft refuses to serve answers
+`403`, `404` or `415`.
+
 ## Run
+
+Needs Python 3.11 or newer. The Docker image uses 3.13.
 
 ```sh
 pip install -r requirements.txt

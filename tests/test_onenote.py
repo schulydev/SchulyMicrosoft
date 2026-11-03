@@ -144,6 +144,10 @@ class FakeNote:
         self.filter_fails = False
         self.content = PAGE
 
+    def batch(self, requests, client=None):
+        self.calls.append(("batch", requests, client))
+        return [{"value": self.list(r.split("?")[0])} for r in requests]
+
     def list(self, path, params=None, limit=None, client=None, **_):
         self.calls.append(("list", path, params))
         if path == "me/joinedTeams":

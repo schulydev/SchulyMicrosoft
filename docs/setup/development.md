@@ -4,6 +4,8 @@ Run the service locally and run its tests.
 
 ## Run the service
 
+You need Python 3.11 or newer.
+
 ```sh
 pip install -r requirements.txt
 python asgi.py

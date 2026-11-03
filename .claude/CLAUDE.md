@@ -22,14 +22,30 @@ The Schuly **Microsoft plugin** is the only caller.
   and responses (the 422 handler for `/api/auth/password*` strips the echoed input on purpose).
 - Uses only the **public** OutNote/Entrance API (`outnote.OutNote`, `entrance.Broker`,
   `entrance.http_client`) plus the documented OAuth calls for the browser and device flows. Don't
-  reach into their private modules. The one non-Graph surface is the Teams chat service for group
+  reach into their private modules. Needs Python 3.11 or newer. The one non-Graph surface is the Teams chat service for group
   chat pictures (`teams_chat.py`): a Teams-client token for `api.spaces.skype.com` is traded at
   `teams.microsoft.com/api/authsvc/v1.0/authz` for a skype token.
 
+## OutNote / Entrance 2.x
+
+- `entrance.http_client()` offers only `request`, `post`, `head` and `close`, takes a float timeout
+  and reads every body into memory. Anything that must stay capped or be streamed uses
+  `outnote_client.download_client()` (httpx, HTTP/1.1, no redirects by default, no cookies kept,
+  because all accounts share it). Don't call `note.download` or `note.download_shared`: they hold the
+  whole file with no cap and no host check.
+- `except entrance.HTTPError` works alone, but it is a tuple: unpack it next to other types.
+- `teams_files.download_url` stays: it serves the `shares/...` path chat files need, which OutNote's
+  `download_url` can't. A folder is a 404 that says so; Graph's refusal at `/content` keeps its own
+  status (403, 404, 415, 429).
+- One `OutNote` per account lives on its broker. A throttled call raises `GraphError` 429 after about
+  60 s, which `_read` answers as 429 with `Retry-After` (and any rotated token).
+- `_read` strips `_native` from every result. No route calls OutNote's native reads today: chat
+  messages stay on Graph's list because `chat_read` and the callers need its attachments, mentions and
+  reactions. `emails()` gets an explicit `$select` because the web's list shows `toRecipients`.
+- Never add `SQLiteCache` or any other on-disk cache. `stream()` cursors would have to live in the plugin.
+
 ## Cold start
 
-- `src/__init__.py` hides `h2` so the shared httpx clients use HTTP/1.1 (httpcore's sync HTTP/2
-  connection races on stream ids under concurrent first requests); `MS_HTTP2=1` opts back in.
 - Read `/me` only through `profile.get`: it asks `/me` once without OutNote's retries (Graph 429s it with ~21 s Retry-After) and falls back to the access token's claims (oid, name, upn).
 - `GET /health/live` is always 200; `GET /health/ready` is 503 until the startup warm-up finished or 15 s passed
   (the Dockerfile `HEALTHCHECK` uses it).

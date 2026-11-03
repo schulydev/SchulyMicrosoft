@@ -433,7 +433,7 @@ def reaches(obj, needle, seen=None, depth=0):
         return any(reaches(k, needle, seen, depth + 1) or reaches(v, needle, seen, depth + 1) for k, v in obj.items())
     if isinstance(obj, (list, tuple, set, frozenset)):
         return any(reaches(v, needle, seen, depth + 1) for v in obj)
-    if isinstance(obj, (threading.Condition, threading.Lock, threading.Event, int, float, bool, type(None))):
+    if isinstance(obj, (threading.Condition, type(threading.Lock()), threading.Event, int, float, bool, type(None))):
         return False
     attrs = dict(getattr(obj, "__dict__", {}))
     for cls in type(obj).__mro__:

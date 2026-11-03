@@ -13,6 +13,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable
+from http.cookiejar import DefaultCookiePolicy
 
 import entrance
 import httpx
@@ -55,7 +56,10 @@ class _SharedBroker(Broker):
     expiry. The Broker used to be rebuilt per request, so every call redeemed. Sharing it means
     repeat calls reuse the minted access tokens and the refresh token stays unchanged. The lock makes
     concurrent misses redeem once instead of racing; `on_rotate` re-registers the broker under the
-    new token's hash so the caller's next request (which sends the rotated token) still hits."""
+    new token's hash so the caller's next request (which sends the rotated token) still hits.
+
+    It also owns the account's one OutNote client, as OutNote recommends for long-lived use: the ids that client keeps in
+    memory (user, tenant) belong to this account and live and die with this broker, so accounts never share one."""
 
     def __init__(self, refresh_token: str, on_rotate: Callable[[str, "_SharedBroker"], None]):
         super().__init__(refresh_token)
@@ -63,6 +67,7 @@ class _SharedBroker(Broker):
         self._on_rotate = on_rotate
         # Per-account values that rarely change (folder roles, chat pictures); shared with the broker's lifetime.
         self.cache = AccountCache()
+        self.note = OutNote(self)
 
     def __call__(self, client_id, scope="https://graph.microsoft.com/.default"):
         with self._lock:
@@ -117,18 +122,43 @@ _brokers = _BrokerCache()
 def build_client(refresh_token: str) -> tuple[OutNote, Broker]:
     """An OutNote client over a shared per-token broker; read `broker.refresh_token` after use for the (possibly rotated) value."""
     broker = _brokers.get(refresh_token)
-    return OutNote(broker), broker
+    return broker.note, broker
+
+
+def strip_native(value):
+    """Removes OutNote's `_native` copies (the raw Teams answer, with raw ids) from a result, in place, at any depth."""
+    if isinstance(value, dict):
+        value.pop("_native", None)
+        for item in value.values():
+            strip_native(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            strip_native(item)
+    return value
 
 
 _async_client: httpx.AsyncClient | None = None
+_download_client: httpx.Client | None = None
+_download_lock = threading.Lock()
 
 
-def _http2() -> bool:
-    try:
-        import h2  # noqa: F401
-    except ImportError:
-        return False
-    return True
+def download_client() -> httpx.Client:
+    """One keep-alive client for bodies that must stay capped or be streamed: `entrance.http_client()` reads every body into memory first and has no stream.
+
+    It is shared by all accounts, so it keeps no cookies (SharePoint sets them on downloads) and never holds a token; a bearer goes per request, with redirects off."""
+    global _download_client
+    if _download_client is None:
+        with _download_lock:
+            if _download_client is None:
+                client = httpx.Client(
+                    timeout=httpx.Timeout(30.0, connect=5.0),
+                    limits=httpx.Limits(max_connections=100, max_keepalive_connections=20, keepalive_expiry=60),
+                    transport=httpx.HTTPTransport(retries=3),
+                    follow_redirects=False,
+                )
+                client.cookies.jar.set_policy(DefaultCookiePolicy(allowed_domains=[]))
+                _download_client = client
+    return _download_client
 
 
 def shared_async_client() -> httpx.AsyncClient:
@@ -138,16 +168,20 @@ def shared_async_client() -> httpx.AsyncClient:
         _async_client = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0, connect=5.0),
             limits=httpx.Limits(max_connections=50, max_keepalive_connections=10, keepalive_expiry=60),
-            transport=httpx.AsyncHTTPTransport(retries=3, http2=_http2()),
+            transport=httpx.AsyncHTTPTransport(retries=3),
         )
     return _async_client
 
 
 async def close_shared_client():
-    global _async_client
+    global _async_client, _download_client
     client, _async_client = _async_client, None
     if client is not None:
         await client.aclose()
+    with _download_lock:
+        download, _download_client = _download_client, None
+    if download is not None:
+        download.close()
 
 
 async def warm_up():
@@ -167,7 +201,7 @@ async def _post(url: str, data: dict, client: httpx.AsyncClient | None) -> dict:
 
 def stream_download(url: str, limit: int, follow_redirects: bool = True):
     """Yields a pre-authorized download URL's bytes in chunks (no bearer token is sent), stopping past `limit` bytes."""
-    with entrance.http_client().stream("GET", url, timeout=httpx.Timeout(60.0, connect=5.0), follow_redirects=follow_redirects) as r:
+    with download_client().stream("GET", url, timeout=httpx.Timeout(60.0, connect=5.0), follow_redirects=follow_redirects) as r:
         r.raise_for_status()
         sent = 0
         for chunk in r.iter_bytes(64 * 1024):
