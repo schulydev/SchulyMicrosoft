@@ -4,133 +4,24 @@
   <strong>Stateless Microsoft 365 access for Schuly, over <a href="https://github.com/PianoNic/OutNote">OutNote</a> / <a href="https://github.com/PianoNic/Entrance">Entrance</a>.</strong>
 </p>
 
+> [!WARNING]
+> **For educational and research purposes**, and only against **accounts you own**. It drives a real Microsoft sign-in, so treat any returned refresh token like a password. Reusing Microsoft's first-party clients isn't an officially supported integration path, and a tenant may block it. Not affiliated with or endorsed by Microsoft.
+
 ---
 
-The Schuly **Microsoft plugin** calls this service to read a student's own Microsoft 365
-data — mail, calendar, OneDrive, OneNote, Teams chats — without registering an Azure app or
-asking a tenant admin for consent. It rides Microsoft's own pre-consented first-party
-clients through OutNote's FOCI token broker.
+## What is SchulyMicrosoft?
+
+Reading a mailbox over Graph normally takes a registered Azure app and admin consent, which a locked-down school tenant refuses. This service goes through Microsoft's own pre-consented first-party clients instead, so a student reaches their own mail, calendar, OneDrive, OneNote and Teams with neither.
+
+The [Schuly Microsoft plugin](https://github.com/schulydev/SchulyPlugins/tree/main/src/Schuly.Plugin.Microsoft) is its only caller.
 
 ## How sign-in works
 
-The student signs in **once**, always on Microsoft's real sign-in page (so push,
-number-matching and passkeys all work). The one exception is the password sign-in route below (see
-"Password sign-in"); every other route never sees a password. Two flows:
+The student signs in once. The mobile app uses Microsoft's real page in a WebView, other callers can use a device code, and the web app, which can't host that page, sends the password once. That password stays in memory for the one call and is never stored or logged.
 
-- **Browser sign-in** (what the Schuly Microsoft plugin uses): an OAuth 2.0
-  authorization-code + PKCE flow. `browser/start` returns the authorize URL and a
-  `code_verifier`; the app opens the URL in a WebView, captures the `?code=` from the
-  redirect to Microsoft's native-client URL, and sends it back with the verifier to
-  `browser/complete`. Works on tenants that block the device-code flow.
-- **Device-code flow**: the service returns a short code and a URL, the student opens the
-  URL and enters the code, and the caller polls until it completes.
+Each way ends in a refresh token that the **caller stores** and sends back in `X-MS-Refresh-Token`. The rotated token comes back in the same header. **The service stores nothing.**
 
-### Password sign-in
-
-For the Schuly web app, which cannot host Microsoft's page: `password/start` receives the Microsoft
-password **once**, passes it to Entrance on a worker thread and drops it. It is held only in memory for
-that call and is never stored, cached, logged or returned. If Microsoft asks for MFA the sign-in pauses
-and `start` returns the methods the account offers (`push` = Authenticator number matching, `otp` = a
-code from an authenticator app); `method` picks one (and may switch mid-way), `otp` submits the code.
-No MFA means `start` completes right away. Federated/ADFS accounts, unsupported methods and
-Conditional Access blocks return `error` with code `unsupported` / `blocked`.
-These routes are callable only by the Schuly plugin: every request needs the shared secret in
-`X-Schuly-Service-Key` (must equal the `SCHULY_SERVICE_KEY` env var; if that is unset the routes answer 503)
-and the signed-in Schuly user's id in `X-Schuly-User-Id` (else 401). A job belongs to that user: anyone else gets
-404 for it. Only failed password attempts count against the per-(user, account) limit, and authenticator
-codes are budgeted (5 per job, 10 per hour per user and account; then `error` / `otp_exhausted`). Sign-in jobs live in
-memory for at most 10 minutes, so **run exactly one process** (`asgi.py` pins `workers=1`).
-
-Either way the result is a FOCI family refresh token that the **caller stores** and sends
-back on each read; the broker rotates it and the service hands the new one back in the
-`X-MS-Refresh-Token` header. **The service stores nothing.**
-
-```
-POST /api/auth/browser/start         → { authorize_url, redirect_uri, code_verifier }
-POST /api/auth/browser/complete      { code, code_verifier } → complete (+ refresh_token, account) | error
-POST /api/auth/device/start          → { user_code, verification_uri, device_code, ... }
-POST /api/auth/device/poll           { device_code } → pending | complete (+ refresh_token, account)
-POST /api/auth/password/start        { username, password } → complete | mfa_required { methods } | error { code }
-POST /api/auth/password/{id}/method  { method: push|otp } → push_pending { number, expires_in } | otp_required
-POST /api/auth/password/{id}/otp     { code } → complete | otp_invalid { attempts_left } | error
-GET  /api/auth/password/{id}         → current status (push_pending | complete | denied | timed_out | error | ...)
-DELETE /api/auth/password/{id}       → 204 (cancel)
-GET  /api/me                         header X-MS-Refresh-Token  (profile cached 1 h per account; from the token claims while /me is throttled)
-GET  /health/live                    → 200 { status: ok }
-GET  /health/ready                   → 503 { status: starting } until warm-up is done (max 15 s), then 200 { status: ready }
-GET  /api/mail?folder=&top=&skip=&unread=&search=  "  (skip pages, not with search; folder: well-known name or folder id)
-GET  /api/mail/folders               "  (nested: childFolders[])
-GET  /api/mail/{id}                  "  (full message incl. body)
-GET  /api/mail/{id}/attachments      "  (metadata only)
-GET  /api/mail/{id}/attachments/{aid} "  (bytes, <= 25 MB, no-store)
-POST /api/mail/send                  { to[], cc?, bcc?, subject, body, html?, attachments?[{name,contentType,contentBase64}] } → 204
-POST /api/mail/drafts                same body → created draft (201)
-POST /api/mail/drafts/{id}/send      → 204
-POST /api/mail/{id}/reply            { comment, replyAll? } → 204
-POST /api/mail/{id}/forward          { to[], comment? } → 204
-POST /api/mail/{id}/read             { read }
-POST /api/mail/{id}/flag             { status: flagged|complete|notFlagged }
-POST /api/mail/{id}/move             { folder } → moved message
-DELETE /api/mail/{id}                → 204
-GET  /api/calendar?top=&start=&end=  "
-GET  /api/files?path=&top=           "
-GET  /api/chats?top=                 "
-GET  /api/notebooks                  "
-GET  /api/onenote/notebooks?teams=   "  (own, then each joined team's / class notebooks; ids of a team's are <group>@<id>)
-GET  /api/onenote/notebooks/{id}/sections          "  (tree: sections and section groups)
-GET  /api/onenote/sections/{id}/pages?top=&skip=  "  (top <= 100, nextSkip pages on, level = subpage indent)
-POST /api/onenote/sections/{id}/pages             { title, html? } → created page (201)
-GET  /api/onenote/pages/{id}                       "  (sanitized html, resources, outlines, ink as SVG)
-PATCH /api/onenote/pages/{id}                      { title?, outlines?[{id, html}], append? } → page after the save
-DELETE /api/onenote/pages/{id}                     → 204
-GET  /api/onenote/resources/{id}?kind=image|file&name=  "  (image inline, file as download, <= 25 MB, no-store)
-GET  /api/onenote/search?q=&notebook=&top=         "  (page titles; partial when a class notebook was searched in part)
-GET  /api/chats/{id}/messages?top=   "  (newest first, top <= 50)
-POST /api/chats/{id}/messages        { text } (1-4000 chars) → created message
-POST /api/chats/{id}/read            → 204
-GET  /api/users/{id}/photo?size=     "  (48|64|96|120|240) → image bytes, 404 if none
-GET  /api/chats/{id}/messages/{mid}/files/{fid}/thumbnail?size=  small|medium|large → JPEG/PNG/WEBP, 404 if none
-GET  /api/files/{itemId}/thumbnail?size=                          "  (OneDrive item)
-GET  /api/files/{itemId}/pdf                                      Office file as PDF (inline, no-store, sandboxed; 415 if not convertible)
-GET  /api/chats/{id}/messages/{mid}/files/{fid}/pdf               "  (chat file, converted where it lives)
-GET  /api/mail/{id}/attachments/{aid}/pdf                         "  (<= 25 MB, via a temporary app-folder file)
-POST /api/convert/pdf?name=                                       raw bytes (<= 105 MB) → PDF, via a temporary app-folder file
-GET  /api/teams                                                    joined teams [{id, displayName, description}] (10 min cache)
-GET  /api/teams/{teamId}/channels                                 [{id, displayName, membershipType, description}]
-GET  /api/teams/{teamId}/files?channel_id=&path=&top=             {driveId, folder: {id, name, path}, items[]} (team library or channel folder)
-GET  /api/teams/{teamId}/channels/{channelId}/messages?top=       channel posts, newest first (1-200)
-GET  /api/teams/{teamId}/channels/{channelId}/messages/{mid}/replies?top=   replies, oldest first
-GET  /api/drives/{driveId}/items/{itemId}                         one driveItem (fresh download URL)
-GET  /api/drives/{driveId}/items/{itemId}/children?top=           driveItems
-GET  /api/drives/{driveId}/items/{itemId}/content                 file bytes (attachment, <= 100 MB, no-store)
-GET  /api/drives/{driveId}/items/{itemId}/pdf | /thumbnail?size=  as the /api/files/{id} routes
-GET  /api/drives/{driveId}/items/{itemId}/text?offset=&max_chars=&sheet=&row_offset=&max_rows=   FileText (docx, xlsx, pptx, pdf, text; legacy via PDF)
-GET  /api/files/{itemId}/text?...                                 FileText of an own OneDrive item
-POST /api/convert/text?name=&...                                  raw bytes (<= 25 MB) -> FileText
-GET  /api/files/shared?top= | /api/files/recent?top=              flattened driveItems (parentReference.driveId always set)
-POST /api/files/search                                            { q, from?, size?, teamId? } -> SearchResult (files)
-POST /api/search                                                  { q, types?[files|mail|chats|channels], from?, size?, teamId? } -> SearchResult
-GET  /api/emojis/catalogue?locale=  Teams emoji catalogue (no token, cached 24 h)
-GET  /api/emojis/custom/{documentId}?animated=  tenant custom emoji image (message emojis[].documentId)
-```
-
-## Errors
-
-When Microsoft keeps throttling a call, the service answers `429` with a `Retry-After` header in
-seconds, after waiting about 60 seconds itself. A rotated refresh token still comes back on that answer.
-On the file routes, a folder is a `404` that says so, and a file Microsoft refuses to serve answers
-`403`, `404` or `415`.
-
-## Architecture
-
-Onion clean architecture with CQRS through `mediatorx`; dependencies only point inward, and a test enforces it.
-
-| Ring | Holds |
-|---|---|
-| `src/domain` | Pure types, errors and validators |
-| `src/application` | Commands and queries with their handlers, DTOs, options, services, and the abstractions it needs from outside |
-| `src/infrastructure` | OutNote, Entrance, Graph, Teams, Giphy and file parsing, implementing those abstractions |
-| `src/api` | Controllers, middleware and the composition root (`src/api/app.py`, `src/api/extensions`) |
+Every route is listed at `/docs` on a running service, and [the docs](https://docs.schuly.dev/SchulyMicrosoft/) cover the flows. When Microsoft keeps throttling a call, the service waits about 60 seconds, then answers `429` with `Retry-After`.
 
 ## Run
 
@@ -138,7 +29,7 @@ Needs Python 3.11 or newer. The Docker image uses 3.13.
 
 ```sh
 pip install -r requirements.txt
-python asgi.py                 # http://localhost:8010  (Swagger at /docs)
+python asgi.py                 # http://localhost:8010
 ```
 
 ```sh
@@ -146,14 +37,10 @@ docker build -t schulymicrosoft .
 docker run -p 8010:8010 schulymicrosoft
 ```
 
-## Disclaimer
+Password sign-in answers `503` until you set `SCHULY_SERVICE_KEY`. Sign-in jobs live in memory, so run exactly one process.
 
-For **educational and research purposes**, and only against **accounts you own**. It drives a
-real Microsoft sign-in; treat any returned refresh token like a password. Reusing Microsoft's
-first-party clients is not an officially supported integration path, and a tenant may block
-it. Not affiliated with or endorsed by Microsoft. See [OutNote](https://github.com/PianoNic/OutNote)
-and [Entrance](https://github.com/PianoNic/Entrance) for the auth mechanics.
+The code is an onion in `src/`: `domain`, `application`, then `infrastructure` and `api`. `tests/test_architecture.py` fails if a dependency points outward.
 
 ## License
 
-PolyForm Noncommercial License 1.0.0
+[PolyForm Noncommercial 1.0.0](LICENSE)
