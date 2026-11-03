@@ -8,8 +8,8 @@ import pytest
 from fastapi.testclient import TestClient
 from outnote import GraphError
 
-from src import config, file_pdf, outnote_client
-from src.app import app
+from tests.services import config, file_pdf, http_clients, outnote_client
+from src.api.app import app
 
 H = {config.REFRESH_TOKEN_HEADER: "old-frt"}
 PDF = b"%PDF-1.7\n" + b"x" * 300
@@ -104,7 +104,7 @@ def env(monkeypatch):
     note = Note(broker)
     http = Http()
     monkeypatch.setattr(outnote_client, "build_client", lambda frt: (note, broker))
-    monkeypatch.setattr(outnote_client, "download_client", lambda: http)
+    monkeypatch.setattr(http_clients, "download_client", lambda: http)
     return note, http, TestClient(app)
 
 
@@ -289,7 +289,7 @@ def test_convert_route_caps_the_declared_length(env):
 
 
 def test_convert_route_counts_a_chunked_body(env, monkeypatch):
-    import src.app as service
+    from tests.services import app_module as service
 
     monkeypatch.setattr(service, "MAX_SEND_BYTES", 1024)
     note, _, client = env

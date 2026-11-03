@@ -4,8 +4,8 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from src import outnote_client
-from src.app import app
+from tests.services import http_clients, outnote_client
+from src.api.app import app
 
 
 class FakeNote:
@@ -31,13 +31,13 @@ def mock_ms(monkeypatch):
         return httpx.Response(200, json={"access_token": "at", "refresh_token": "new-frt", "expires_in": 3600})
 
     transport = httpx.MockTransport(handler)
-    original = outnote_client._post
+    original = http_clients.post_form
 
     async def patched(url, data, client=None):
         async with httpx.AsyncClient(transport=transport) as c:
             return await original(url, data, c)
 
-    monkeypatch.setattr(outnote_client, "_post", patched)
+    monkeypatch.setattr(http_clients, "post_form", patched)
     monkeypatch.setattr(outnote_client, "build_client", lambda frt: (FakeNote(), FakeBroker(frt)))
     return state
 

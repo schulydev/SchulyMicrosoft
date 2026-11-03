@@ -8,7 +8,7 @@ import httpx
 import wreq.exceptions
 import pytest
 
-from src import profile
+from tests.services import profile
 from tests.conftest import REAL_FETCH
 
 

@@ -1,0 +1,2 @@
+class GifSearchUnavailable(RuntimeError):
+    pass

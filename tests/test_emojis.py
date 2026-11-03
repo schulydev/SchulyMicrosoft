@@ -6,8 +6,8 @@ import pytest
 from fastapi.testclient import TestClient
 from outnote import GraphError
 
-from src import chat_html, chat_send, config, emojis, file_thumbs, outnote_client, teams_chat
-from src.app import app
+from tests.services import OutgoingMessage, SendError, chat_html, chat_send, config, emojis, file_thumbs, http_clients, outnote_client, teams_chat
+from src.api.app import app
 from tests.test_teams_extras import Broker, Note
 
 H = {config.REFRESH_TOKEN_HEADER: "old-frt"}
@@ -191,15 +191,15 @@ def test_skin_tones_only_on_diverse_emoji(cdn):
 
 
 def test_send_posts_teams_emoji_markup(cdn):
-    msg = chat_send.OutgoingMessage(content='<p>go <emoji id="1f4af_hundredpointssymbol" alt="x"></emoji></p>', content_type="html")
+    msg = OutgoingMessage(content='<p>go <emoji id="1f4af_hundredpointssymbol" alt="x"></emoji></p>', content_type="html")
     body = chat_send.payload(chat_send.validate(msg))["body"]
     assert body == {"contentType": "html", "content": '<p>go <emoji id="1f4af_hundredpointssymbol" alt="\U0001F4AF" title="Hundred points"></emoji></p>'}
 
 
 def test_send_says_503_when_the_catalogue_is_unavailable(cdn):
     cdn.fail = True
-    with pytest.raises(chat_send.SendError) as ex:
-        chat_send.payload(chat_send.validate(chat_send.OutgoingMessage(content='<emoji id="laugh"></emoji>', content_type="html")))
+    with pytest.raises(SendError) as ex:
+        chat_send.payload(chat_send.validate(OutgoingMessage(content='<emoji id="laugh"></emoji>', content_type="html")))
     assert ex.value.status == 503
 
 
@@ -234,7 +234,7 @@ class AmsHttp:
 def ams(account, monkeypatch):
     fake = AmsHttp()
     monkeypatch.setattr(teams_chat, "http_client", lambda: fake)
-    monkeypatch.setattr(outnote_client, "download_client", lambda: fake)
+    monkeypatch.setattr(http_clients, "download_client", lambda: fake)
     return fake
 
 

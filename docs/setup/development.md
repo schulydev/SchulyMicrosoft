@@ -34,5 +34,6 @@ python -m pytest tests -q
 - Keep passwords out of logs, sign-in jobs, errors, and responses.
 - Keep the service to one process. Don't add workers or replicas.
 - Use only the public OutNote and Entrance APIs.
+- Keep dependencies pointing inward: `domain`, then `application`, then `infrastructure` and `api`. `tests/test_architecture.py` fails otherwise.
 
 For the workflow, see [Contribute](/contribute/).

@@ -9,10 +9,10 @@ import pytest
 from entrance import _foci
 from fastapi.testclient import TestClient
 
-from src import app as app_module
-from src import config, outnote_client
-from src.app import app
-from src.outnote_client import _BrokerCache
+
+from tests.services import _BrokerCache, config, http_clients, outnote_client, warm_up_tracker
+from src.api.app import app
+
 
 HEADER = {config.REFRESH_TOKEN_HEADER: "frt-cold"}
 REDEEM_SECONDS = 0.5
@@ -49,7 +49,7 @@ def cold(monkeypatch):
     async def no_warm_up():
         return None
 
-    monkeypatch.setattr(outnote_client, "warm_up", no_warm_up)
+    monkeypatch.setattr(http_clients, "warm_up", no_warm_up)
     return redeems, reads
 
 
@@ -81,7 +81,7 @@ def test_ready_is_503_until_warm_up_finishes(monkeypatch):
     async def slow_warm_up():
         await asyncio.to_thread(release.wait, 10)
 
-    monkeypatch.setattr(outnote_client, "warm_up", slow_warm_up)
+    monkeypatch.setattr(http_clients, "warm_up", slow_warm_up)
     with TestClient(app) as client:
         assert client.get("/health/live").json() == {"status": "ok"}
         blocked = client.get("/health/ready")
@@ -102,8 +102,8 @@ def test_ready_after_grace_period_even_if_warm_up_hangs(monkeypatch):
     async def slow_warm_up():
         await asyncio.to_thread(release.wait, 10)
 
-    monkeypatch.setattr(outnote_client, "warm_up", slow_warm_up)
-    monkeypatch.setattr(app_module, "READY_GRACE", 0.0)
+    monkeypatch.setattr(http_clients, "warm_up", slow_warm_up)
+    monkeypatch.setattr(warm_up_tracker, "READY_GRACE", 0.0)
     with TestClient(app) as client:
         assert client.get("/health/ready").status_code == 200
         release.set()

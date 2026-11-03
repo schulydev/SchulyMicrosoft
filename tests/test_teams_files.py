@@ -7,8 +7,8 @@ import pytest
 from fastapi.testclient import TestClient
 from outnote import C_SITES, GraphError
 
-from src import config, file_text, outnote_client, teams_files
-from src.app import app
+from tests.services import config, http_clients, outnote_client, teams_files
+from src.api.app import app
 from tests.test_file_text import docx_bytes
 
 H = {config.REFRESH_TOKEN_HEADER: "old-frt"}
@@ -104,7 +104,7 @@ def env(monkeypatch):
     note = Note(broker)
     http = Http()
     monkeypatch.setattr(outnote_client, "build_client", lambda frt: (note, broker))
-    monkeypatch.setattr(outnote_client, "download_client", lambda: http)
+    monkeypatch.setattr(http_clients, "download_client", lambda: http)
     return note, http, TestClient(app)
 
 
@@ -251,7 +251,7 @@ def test_text_route_converts_legacy_through_pdf(env, monkeypatch):
     note, http, client = env
     from tests.test_file_text import pdf_bytes
     import io
-    from src import file_pdf
+    from tests.services import file_pdf
 
     note.item = {"id": "I", "name": "old.doc", "size": 5, "file": {}}
     monkeypatch.setattr(file_pdf, "drive_item_pdf", lambda n, item_id, drive_id=None: io.BytesIO(pdf_bytes(1)))
@@ -273,7 +273,7 @@ def test_convert_text_raw_bytes(env):
 
 def test_convert_text_body_cap(env, monkeypatch):
     _, _, client = env
-    import src.app as app_module
+    from tests.services import app_module
 
     monkeypatch.setattr(app_module, "MAX_TEXT_SOURCE_BYTES", 100)
     assert client.post("/api/convert/text?name=x.txt", content=b"a" * 101, headers=H).status_code == 413
@@ -291,7 +291,7 @@ class LinkNote:
     def redirect(self, path):
         self.paths.append(path)
         if self.location is None:
-            raise teams_files.GraphError(200, "expected a redirect, got 200")
+            raise GraphError(200, "expected a redirect, got 200")
         return self.location
 
 

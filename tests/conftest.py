@@ -1,6 +1,6 @@
 import pytest
 
-from src import profile
+from tests.services import profile
 
 REAL_FETCH = profile._fetch
 

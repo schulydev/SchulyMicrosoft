@@ -121,6 +121,17 @@ seconds, after waiting about 60 seconds itself. A rotated refresh token still co
 On the file routes, a folder is a `404` that says so, and a file Microsoft refuses to serve answers
 `403`, `404` or `415`.
 
+## Architecture
+
+Onion clean architecture with CQRS through `mediatorx`; dependencies only point inward, and a test enforces it.
+
+| Ring | Holds |
+|---|---|
+| `src/domain` | Pure types, errors and validators |
+| `src/application` | Commands and queries with their handlers, DTOs, options, services, and the abstractions it needs from outside |
+| `src/infrastructure` | OutNote, Entrance, Graph, Teams, Giphy and file parsing, implementing those abstractions |
+| `src/api` | Controllers, middleware and the composition root (`src/api/app.py`, `src/api/extensions`) |
+
 ## Run
 
 Needs Python 3.11 or newer. The Docker image uses 3.13.

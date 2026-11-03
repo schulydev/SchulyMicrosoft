@@ -10,5 +10,6 @@ openpyxl==3.1.5
 python-pptx==1.0.2
 pypdf==6.21.4
 defusedxml==0.7.1
+mediatorx==1.0.1
 pytest==8.3.5
 pytest-asyncio==0.26.0
