@@ -3,12 +3,18 @@ import logging
 import threading
 import time
 from http.cookiejar import DefaultCookiePolicy
+from urllib.parse import urljoin
 
 import entrance
 import httpx
 
 from src.application.abstractions.i_microsoft_http_clients import IMicrosoftHttpClients
 from src.application.options.microsoft_options import MicrosoftOptions
+from src.application.services.retry_after import RetryAfter
+from src.domain.errors.download_link_expired import DownloadLinkExpired
+from src.domain.errors.service_error import ServiceError
+from src.domain.files.byte_range import ByteRange
+from src.domain.files.file_stream import FileStream
 from src.infrastructure.logging_config import LoggerNames
 
 
@@ -16,6 +22,8 @@ class MicrosoftHttpClients(IMicrosoftHttpClients):
     """The shared keep-alive clients: one for capped or streamed bodies and one for the sign-in calls."""
 
     log = logging.getLogger(LoggerNames.SERVICE)
+    MAX_DOWNLOAD_REDIRECTS = 3
+    DOWNLOAD_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
 
     def __init__(self, options: MicrosoftOptions):
         self._options = options
@@ -72,13 +80,61 @@ class MicrosoftHttpClients(IMicrosoftHttpClients):
         finally:
             self.log.debug("POST %s took %.0f ms", url, (time.perf_counter() - started) * 1000)
 
-    def stream_download(self, url: str, limit: int, follow_redirects: bool = True):
-        """Yields a pre-authorized download URL's bytes in chunks (no bearer token is sent), stopping past `limit` bytes."""
-        with self.download_client().stream("GET", url, timeout=httpx.Timeout(60.0, connect=5.0), follow_redirects=follow_redirects) as r:
-            r.raise_for_status()
-            sent = 0
-            for chunk in r.iter_bytes(64 * 1024):
+    def open_download(self, url: str, limit: int, allowed, content_type: str, file_name: str, byte_range: str | None = None) -> FileStream:
+        """Opens a pre-authorized download URL (no bearer token is sent) and answers once its status and headers are known, so a refusal is a real status and not a broken 200.
+
+        Every hop must pass `allowed`. It asks for the bytes as they are (`identity`) and passes them on raw, so a `Range` and the lengths stay true. The body is read chunk by chunk as the caller asks for it."""
+        headers = {"Accept-Encoding": "identity"}
+        if byte_range:
+            headers["Range"] = byte_range
+        client = self.download_client()
+        for _ in range(self.MAX_DOWNLOAD_REDIRECTS + 1):
+            if not allowed(url):
+                raise ServiceError(502, "The file has an unexpected download location.")
+            r = client.send(client.build_request("GET", url, headers=headers, timeout=self.DOWNLOAD_TIMEOUT), stream=True, follow_redirects=False)
+            if not r.is_redirect:
+                return self._opened(r, limit, content_type, file_name)
+            location = r.headers.get("Location")
+            r.close()
+            if not location:
+                raise ServiceError(502, "The download failed (a redirect with no location).")
+            url = urljoin(url, location)
+        raise ServiceError(502, "The download failed (too many redirects).")
+
+    def _opened(self, r: httpx.Response, limit: int, content_type: str, file_name: str) -> FileStream:
+        status = r.status_code
+        if status in (200, 206):
+            content_range = ByteRange.safe_content_range(r.headers.get("Content-Range")) if status == 206 else None
+            if status == 206 and content_range is None:
+                r.close()
+                raise ServiceError(502, "The download failed (an unreadable range).")
+            length = int(r.headers["Content-Length"]) if r.headers.get("Content-Length", "").isdigit() else None
+            whole = ByteRange.total(content_range) if status == 206 else length
+            if (whole or 0) > limit or (length or 0) > limit:
+                r.close()
+                raise ServiceError(413, "The file is too large.")
+            return FileStream(self._body(r, limit), content_type, file_name, status, length, content_range)
+        if status == 416:
+            content_range = ByteRange.safe_content_range(r.headers.get("Content-Range"))
+            r.close()
+            return FileStream(iter(()), content_type, file_name, 416, 0, content_range)
+        retry_after = r.headers.get("Retry-After", "")
+        r.close()
+        if status in (401, 403, 410):
+            raise DownloadLinkExpired()
+        if status in (429, 503):
+            raise ServiceError(429, "Microsoft is throttling this download; try again later.", headers={"Retry-After": RetryAfter.header(float(retry_after) if retry_after.isdigit() else None)})
+        raise ServiceError(404 if status == 404 else 502, f"The download failed ({status}).")
+
+    @staticmethod
+    def _body(r: httpx.Response, limit: int):
+        """The body, broken off past `limit` rather than quietly cut short. Closing the iterator (a player that seeks elsewhere) closes the connection."""
+        sent = 0
+        try:
+            for chunk in r.iter_raw(64 * 1024):
                 sent += len(chunk)
                 if sent > limit:
-                    return
+                    raise ServiceError(413, "The file is too large.")
                 yield chunk
+        finally:
+            r.close()

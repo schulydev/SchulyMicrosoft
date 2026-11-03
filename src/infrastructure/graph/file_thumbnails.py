@@ -105,21 +105,26 @@ class FileThumbnails(IFileThumbnails):
         if hit is not marker:
             return hit
         try:
-            item = note.get(GraphPaths.drive_item_path(url, "id,parentReference,file,size,webUrl"))
+            item = note.get(GraphPaths.drive_item_path(url, "id,parentReference,file,size,webUrl"), retry=False)
         except GraphError as ex:
             if ex.status in (400, 403, 404):
                 cache.set(key, None, self.ITEM_TTL)
                 return None
             raise
+        return self.remember_item(broker, url, item)
+
+    def remember_item(self, broker, url: str, item: dict) -> tuple[str, str] | None:
+        """Keeps the ids of a drive item already read, so its thumbnail needs no lookup of its own."""
         drive = ((item or {}).get("parentReference") or {}).get("driveId")
         item_id = (item or {}).get("id")
         found = (drive, item_id) if (item or {}).get("file") is not None and self.safe_graph_id(drive) and self.safe_graph_id(item_id) else None
-        cache.set(key, found, self.ITEM_TTL)
+        AccountCache.for_broker(broker).set(("share_item", url), found, self.ITEM_TTL)
         return found
 
     def _content(self, note, path: str) -> bytes | None:
         try:
-            data = note.get(path, raw="bytes")
+            # Throttled, this answers at once: a thumbnail is not worth a worker thread asleep for a minute.
+            data = note.get(path, raw="bytes", retry=False)
         except GraphError as ex:
             if ex.status in (400, 404, 415):
                 return None

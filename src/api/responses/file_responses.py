@@ -21,7 +21,13 @@ class FileResponses:
 
     @classmethod
     def stream(cls, content: FileStream) -> StreamingResponse:
-        return StreamingResponse(content.chunks, media_type=content.content_type, headers=cls._download_headers(content.file_name))
+        """Always an attachment that can't run, whatever the type: a `<video>` plays it all the same and a navigation downloads it."""
+        headers = {**cls._download_headers(content.file_name), "Accept-Ranges": "bytes"}
+        if content.content_length is not None:
+            headers["Content-Length"] = str(content.content_length)
+        if content.content_range:
+            headers["Content-Range"] = content.content_range
+        return StreamingResponse(content.chunks, status_code=content.status_code, media_type=content.content_type, headers=headers)
 
     @classmethod
     def image(cls, content: BinaryContent) -> Response:

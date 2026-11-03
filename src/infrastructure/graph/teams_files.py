@@ -28,6 +28,8 @@ class TeamsFiles(ITeamsFiles):
     MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
     FETCH_TIMEOUT = httpx.Timeout(120.0, connect=5.0)
     ITEM_FIELDS = "id,name,size,file,folder,webUrl,lastModifiedDateTime,createdDateTime,parentReference,lastModifiedBy,createdBy"
+    DOWNLOAD_HOST_SUFFIXES = (".sharepoint.com", ".files.1drv.com")  # a share link can be on personal OneDrive, whose files come from `*.files.1drv.com`
+    DOWNLOAD_LINK_TTL = 600  # the links last longer; a video's every seek must not cost a Graph call
     FORBIDDEN_PATH = re.compile(r"[%\\:#?\x00-\x1f\x7f]")
 
     def __init__(self, http: IMicrosoftHttpClients):
@@ -48,7 +50,7 @@ class TeamsFiles(ITeamsFiles):
         return parts
 
     def is_download_url(self, url) -> bool:
-        """True only for an https SharePoint download URL: host ends with `.sharepoint.com`, default port, no credentials."""
+        """True only for an https SharePoint or personal OneDrive download URL: host under `DOWNLOAD_HOST_SUFFIXES`, default port, no credentials."""
         if not isinstance(url, str) or not url or len(url) > 8000 or any(ord(c) < 33 for c in url):
             return False
         try:
@@ -57,7 +59,7 @@ class TeamsFiles(ITeamsFiles):
         except ValueError:
             return False
         host = (parts.hostname or "").lower()
-        return parts.scheme == "https" and port in (None, 443) and not parts.username and not parts.password and host.endswith(".sharepoint.com")
+        return parts.scheme == "https" and port in (None, 443) and not parts.username and not parts.password and host.endswith(self.DOWNLOAD_HOST_SUFFIXES)
 
     def fetch_bytes(self, url: str, cap: int) -> bytes:
         """The bytes behind a pre-authorized download URL (no bearer token, no redirects), 413 past `cap`."""
@@ -104,6 +106,15 @@ class TeamsFiles(ITeamsFiles):
         if not url:
             raise ServiceError(502, "Microsoft did not offer a download link for this file.")
         return url
+
+    def cached_download(self, broker, key: tuple) -> dict | None:
+        return AccountCache.for_broker(broker).get(("download", key))
+
+    def remember_download(self, broker, key: tuple, target: dict) -> None:
+        AccountCache.for_broker(broker).set(("download", key), target, self.DOWNLOAD_LINK_TTL)
+
+    def forget_download(self, broker, key: tuple) -> None:
+        AccountCache.for_broker(broker).discard(lambda k: k == ("download", key))
 
     def item_base(self, drive_id: str | None, item_id: str) -> str:
         return f"drives/{self.seg(drive_id)}/items/{self.seg(item_id)}" if drive_id else f"me/drive/items/{self.seg(item_id)}"

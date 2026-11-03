@@ -25,6 +25,9 @@ class IFileThumbnails(ABC):
     def safe_graph_id(self, value) -> bool: ...
 
     @abstractmethod
+    def remember_item(self, broker: IAccountBroker, url: str, item: dict) -> None: ...
+
+    @abstractmethod
     def chat_file_thumbnail(self, note: IGraphClient, broker: IAccountBroker, url: str, size: str) -> bytes | None: ...
 
     @abstractmethod

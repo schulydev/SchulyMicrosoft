@@ -31,14 +31,16 @@ The Schuly **Microsoft plugin** is the only caller.
 - `entrance.http_client()` offers only `request`, `post`, `head` and `close`, takes a float timeout
   and reads every body into memory. Anything that must stay capped or be streamed uses
   `IMicrosoftHttpClients.download_client()` (httpx, HTTP/1.1, no redirects by default, no cookies kept,
-  because all accounts share it). Don't call `note.download` or `note.download_shared`: they hold the
+  because all accounts share it). `open_download` opens a pre-authorized link before the answer starts, so a refusal is a real status; it follows
+  redirects only through the host check, passes `Range` on and streams raw. `FileDownloads` keeps a link for 10 minutes, so a video's seeks cost no Graph calls. Don't call `note.download` or `note.download_shared`: they hold the
   whole file with no cap and no host check.
 - `except entrance.HTTPError` works alone, but it is a tuple: unpack it next to other types.
 - `TeamsFiles.download_url` stays: it serves the `shares/...` path chat files need, which OutNote's
   `download_url` can't. A folder is a 404 that says so; Graph's refusal at `/content` keeps its own
   status (403, 404, 415, 429).
 - One `OutNote` per account lives on its broker. A throttled call raises `GraphError` 429 after about
-  60 s, which `AccountRunner` answers as 429 with `Retry-After` (and any rotated token).
+  60 s, or at once with `retry=False`, which `AccountRunner` answers as 429 with `Retry-After` (and any rotated token) and logs as a warning with the masked route (`GraphCallTrail`). Keep ids and content out of that line. The chat file, thumbnail and message reads use `retry=False`: the caller waits, not a worker thread.
+- Graph throttles the single chat message read (`chats/{id}/messages/{id}`) far sooner than the list, so `ChatReader.file_ref` answers from what the list already said, then asks `note.chat_message` (Teams' own API, which falls back to that same read and may answer 429 for it), and when that refuses or lacks the file, the list.
 - `AccountRunner` strips `_native` from every result. No route calls OutNote's native reads today: chat
   messages stay on Graph's list because `ChatReader` and the callers need its attachments, mentions and
   reactions. `emails()` gets an explicit `$select` because the web's list shows `toRecipients`.

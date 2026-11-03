@@ -79,6 +79,15 @@ class Stream:
     def __init__(self, body, status=200):
         self.body, self.status_code = body, status
 
+    is_redirect = False
+    headers = {}
+
+    def close(self):
+        pass
+
+    def iter_raw(self, size):
+        return self.iter_bytes(size)
+
     def raise_for_status(self):
         pass
 
@@ -96,6 +105,13 @@ class Http:
     def stream(self, method, url, **kw):
         self.fetched.append((url, kw))
         yield Stream(self.body)
+
+    def build_request(self, method, url, **kw):
+        return url
+
+    def send(self, url, stream=False, follow_redirects=True):
+        self.fetched.append((url, {"follow_redirects": follow_redirects}))
+        return Stream(self.body)
 
 
 @pytest.fixture

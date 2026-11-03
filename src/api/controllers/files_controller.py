@@ -78,9 +78,9 @@ class FilesController:
         return await self.mediator.send(ListDriveItemChildrenQuery(token, drive_id, item_id, top))
 
     @router.get("/drives/{drive_id}/items/{item_id}/content", tags=["Teams files"], response_class=StreamingResponse, responses={200: {"content": {"application/octet-stream": {}}}})
-    async def drive_item_content(self, drive_id: str, item_id: str, token: str = Header(..., alias=HttpHeaders.REFRESH_TOKEN_HEADER)):
+    async def drive_item_content(self, drive_id: str, item_id: str, token: str = Header(..., alias=HttpHeaders.REFRESH_TOKEN_HEADER), byte_range: str | None = Header(None, alias="Range")):
         """The file's bytes as an attachment (<= 100 MB, no-store)."""
-        return FileResponses.stream(await self.mediator.send(GetDriveItemContentQuery(token, drive_id, item_id)))
+        return FileResponses.stream(await self.mediator.send(GetDriveItemContentQuery(token, drive_id, item_id, byte_range)))
 
     @router.get("/drives/{drive_id}/items/{item_id}/pdf", tags=["Files as PDF"], response_class=StreamingResponse, responses={200: {"content": {"application/pdf": {}}}})
     async def shared_drive_item_pdf(self, drive_id: str, item_id: str, token: str = Header(..., alias=HttpHeaders.REFRESH_TOKEN_HEADER)):

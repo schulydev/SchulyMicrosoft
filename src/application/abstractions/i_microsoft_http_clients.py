@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Callable
+
+from src.domain.files.file_stream import FileStream
 
 
 class IMicrosoftHttpClients(ABC):
@@ -9,7 +11,7 @@ class IMicrosoftHttpClients(ABC):
     def download_client(self): ...
 
     @abstractmethod
-    def stream_download(self, url: str, limit: int, follow_redirects: bool = True) -> Iterator[bytes]: ...
+    def open_download(self, url: str, limit: int, allowed: Callable[[str], bool], content_type: str, file_name: str, byte_range: str | None = None) -> FileStream: ...
 
     @abstractmethod
     async def post_form(self, url: str, data: dict, client=None) -> dict: ...

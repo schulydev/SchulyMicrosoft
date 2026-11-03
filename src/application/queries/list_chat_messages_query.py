@@ -22,4 +22,4 @@ class ListChatMessagesHandler(IQueryHandler[ListChatMessagesQuery, list[dict]]):
     async def handle(self, query: ListChatMessagesQuery) -> list[dict]:
         GraphIds.check(query.chat_id, GraphIds.CHAT_ID_PATTERN, "chat_id")
         # No $select: Graph answers 500 for chat messages when one is set.
-        return await self._accounts.run(query.refresh_token, lambda note, broker: self._reader.enrich(note, broker, note.list(f"me/chats/{query.chat_id}/messages", {"$top": min(query.top, 50)}, limit=query.top)))
+        return await self._accounts.run(query.refresh_token, lambda note, broker: self._reader.enrich(note, broker, note.list(f"me/chats/{query.chat_id}/messages", {"$top": min(query.top, 50)}, limit=query.top), query.chat_id))

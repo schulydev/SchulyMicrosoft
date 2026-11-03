@@ -39,8 +39,8 @@ class ChatsController:
         return FileResponses.image(await self.mediator.send(GetChatHostedContentQuery(token, chat_id, message_id, hosted_id)))
 
     @router.get("/chats/{chat_id}/messages/{message_id}/files/{attachment_id}", tags=["Microsoft 365"], response_class=StreamingResponse, responses={200: {"content": {"application/octet-stream": {}}}})
-    async def chat_file(self, chat_id: str, message_id: str, attachment_id: str, token: str = Header(..., alias=HttpHeaders.REFRESH_TOKEN_HEADER)):
-        return FileResponses.stream(await self.mediator.send(GetChatFileQuery(token, chat_id, message_id, attachment_id)))
+    async def chat_file(self, chat_id: str, message_id: str, attachment_id: str, token: str = Header(..., alias=HttpHeaders.REFRESH_TOKEN_HEADER), byte_range: str | None = Header(None, alias="Range")):
+        return FileResponses.stream(await self.mediator.send(GetChatFileQuery(token, chat_id, message_id, attachment_id, byte_range)))
 
     @router.get("/chats/{chat_id}/messages/{message_id}/files/{attachment_id}/thumbnail", tags=["Microsoft 365"], response_class=Response, responses={200: {"content": {"image/jpeg": {}}}})
     async def chat_file_thumbnail(self, chat_id: str, message_id: str, attachment_id: str, token: str = Header(..., alias=HttpHeaders.REFRESH_TOKEN_HEADER), size: str = Query("medium")):
