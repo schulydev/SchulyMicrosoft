@@ -76,6 +76,21 @@ def fetch_bytes(url: str, cap: int) -> bytes:
     return bytes(out)
 
 
+def download_url(note, path: str, item: dict) -> str | None:
+    """The pre-authorized link of the item at `path`. Graph can leave it out of a `$select` answer, so ask again without one, then through `/content`."""
+    url = item.get("@microsoft.graph.downloadUrl")
+    if url:
+        return url
+    full = note.get(path)
+    url = full.get("@microsoft.graph.downloadUrl") if isinstance(full, dict) else None
+    if url:
+        return url
+    try:
+        return note.redirect(f"{path}/content")
+    except GraphError:
+        return None
+
+
 def item_base(drive_id: str | None, item_id: str) -> str:
     return f"drives/{seg(drive_id)}/items/{seg(item_id)}" if drive_id else f"me/drive/items/{seg(item_id)}"
 
