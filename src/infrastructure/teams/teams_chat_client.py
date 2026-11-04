@@ -10,9 +10,13 @@ service issues for a token to `api.spaces.skype.com`:
 3. GET {chatService}/v1/users/ME/conversations/{chatId}?view=msnp24Equivalent (Authentication: skypetoken=...)
 4. GET <picture URL> (Authorization: skype_token ...) -> image bytes
 
+GIF search is a Teams command on the middle tier, also named by `authz` (`regionGtms.middleTier`). It takes the same access
+token and skype token, and the tenant's GIF policy applies to it. It is undocumented; the route is what the Teams web client calls.
+
 The skype token and each chat's picture URL are cached per account (see `AccountCache`).
 """
 
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor, wait
 from urllib.parse import quote, urlsplit
@@ -43,6 +47,9 @@ class TeamsChatClient(ITeamsChat):
     _STREAM_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
     CUSTOM_EMOJI_VIEWS = {True: "imgt2_anim", False: "img_thumb_tiny"}
     MAX_EMOJI_BYTES = 2 * 1024 * 1024
+    GIF_COMMAND = "beta/commands/com.microsoft.teamspace.inputextension.giphy/execute?version=1.0"
+    GIF_LANGUAGE = "en-us"
+    MIDDLE_TIER_HOSTS = ("teams.microsoft.com", "teams.cloud.microsoft")  # both tokens ride on this request
     http_client = staticmethod(http_client)
 
     def __init__(self, http: IMicrosoftHttpClients):
@@ -88,12 +95,30 @@ class TeamsChatClient(ITeamsChat):
         session = (skype, service)
         ams = self._media_host((body.get("regionGtms") or {}).get("amsV2") or (body.get("regionGtms") or {}).get("ams"))
         cache.set("teams_ams", ams, max(60, lifetime - self.SESSION_MARGIN))
+        cache.set("teams_middle_tier", ((body.get("regionGtms") or {}).get("middleTier") or "").rstrip("/"), max(60, lifetime - self.SESSION_MARGIN))
         cache.set("teams_session", session, max(60, lifetime - self.SESSION_MARGIN))
         return session
 
     def _drop_session(self, broker):
         # A skype token the chat service no longer accepts; the next call mints a fresh one.
         AccountCache.for_broker(broker).set("teams_session", None, 0)
+
+    def gif_command(self, broker, query: str, limit: int, rating: str) -> list:
+        """Giphy results from Teams' own GIF command; an empty query asks for what is trending."""
+        skype, _ = self._session(broker)
+        base = AccountCache.for_broker(broker).get("teams_middle_tier") or ""
+        parts = urlsplit(base)
+        if parts.scheme != "https" or parts.port not in (None, 443) or (parts.hostname or "").lower() not in self.MIDDLE_TIER_HOSTS:
+            raise ChatServiceError(502, "authz returned no middle tier")
+        params = {"query": query, "rating": rating, "limit": str(limit), "lang": self.GIF_LANGUAGE}
+        headers = {"Authorization": f"Bearer {broker(self.TEAMS_CLIENT, self.SPACES_SCOPE)}", "X-Skypetoken": skype, "Content-Type": "application/json;charset=UTF-8"}
+        r = self.http_client().post(f"{base}/{self.GIF_COMMAND}", headers=headers, content=json.dumps([{"name": k, "value": v} for k, v in params.items()]).encode(), timeout=self._TIMEOUT)
+        if r.status_code != 200:
+            if r.status_code == 401:
+                self._drop_session(broker)
+            raise ChatServiceError(r.status_code, "GIF command refused")
+        result = r.json().get("result")
+        return result if isinstance(result, list) else []
 
     def _media_host(self, value) -> str | None:
         """The media service base URL when it is an https Microsoft media host, else None."""

@@ -14,3 +14,6 @@ class ITeamsChat(ABC):
 
     @abstractmethod
     def custom_emoji(self, broker: IAccountBroker, document_id: str, animated: bool) -> bytes | None: ...
+
+    @abstractmethod
+    def gif_command(self, broker: IAccountBroker, query: str, limit: int, rating: str) -> list: ...

@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from outnote import GraphError, OutNote
 from outnote._native import message_from_native
 
-from tests.services import AccountRunner, FileFetchError, ResourceTooLarge, Upload, _BrokerCache, chat_send, config, gifs, http_clients, onenote, outnote_client, profile, teams_files
+from tests.services import AccountRunner, FileFetchError, ResourceTooLarge, Upload, _BrokerCache, chat_send, config, http_clients, onenote, outnote_client, profile, teams_files
 from src.api.app import app
 from src.domain.errors.service_error import ServiceError
 
@@ -111,12 +111,6 @@ def test_entrance_http_error_is_a_tuple_and_profile_catches_it_for_real(monkeypa
     monkeypatch.setattr(profile, "ME_URL", server.url + "/me-429")
     me, ttl = REAL_FETCH(None, broker)
     assert me["id"] == "oid-1" and ttl == profile.CLAIMS_TTL
-
-
-def test_a_gif_search_goes_through_the_real_client_with_its_query(monkeypatch, server):
-    monkeypatch.setattr(gifs, "API", server.url)
-    assert gifs._search("k", "red cat", 5) == []
-    assert server.seen[0]["path"].startswith("/search?") and "q=red+cat" in server.seen[0]["path"]
 
 
 def test_an_upload_session_goes_through_the_real_client(server):

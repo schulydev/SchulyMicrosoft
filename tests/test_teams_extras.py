@@ -382,14 +382,67 @@ def test_a_long_expanded_list_is_used_when_the_members_route_is_throttled(env):
     assert len(_invited(note)) == 20
 
 
-def test_gif_search_needs_a_giphy_key(env, monkeypatch):
-    monkeypatch.delenv("GIPHY_API_KEY", raising=False)
-    r = TestClient(app).get("/api/gifs/search", headers=H, params={"q": "cat"})
-    assert r.status_code == 503
+def _gif_http(monkeypatch, status=200, result=None, middle_tier="https://teams.microsoft.com/api/mt/emea"):
+    from tests.services import teams_chat
+    calls = []
+
+    class Http:
+        def post(self, url, headers=None, content=None, timeout=None):
+            if url == teams_chat.AUTHZ_URL:
+                return FakeResponse(200, {"tokens": {"skypeToken": "skype", "expiresIn": 4000}, "regionGtms": {"chatService": "https://ch.ng.msg.teams.microsoft.com", "middleTier": middle_tier}})
+            calls.append({"url": url, "headers": headers, "body": json.loads(content)})
+            return FakeResponse(status, {"result": result or []})
+
+    monkeypatch.setattr(teams_chat, "http_client", lambda: Http())
+    return calls
 
 
-def test_gif_search_needs_a_microsoft_sign_in(env, monkeypatch):
-    monkeypatch.setenv("GIPHY_API_KEY", "k")
+def _gif_item(url=GIF_URL):
+    return {"composeType": "img", "composeValue": f'<img alt="Cat" width="200" height="150" src="{url}?cid=1&amp;ct=g">', "fieldValues": [{"fieldName": "thumbnailUrl", "fieldValue": url.replace("giphy.gif", "200w.gif")}]}
+
+
+def test_gif_search_asks_teams_with_the_accounts_own_tokens(env, monkeypatch):
+    calls = _gif_http(monkeypatch, result=[_gif_item()])
+    client = TestClient(app)
+    r = client.get("/api/gifs/search", headers=H, params={"q": "cat", "limit": 5})
+    assert r.json() == [{"id": GIF_URL, "title": "Cat", "url": GIF_URL, "previewUrl": GIF_URL.replace("giphy.gif", "200w.gif"), "width": 200, "height": 150}]
+    assert calls[0]["url"] == "https://teams.microsoft.com/api/mt/emea/beta/commands/com.microsoft.teamspace.inputextension.giphy/execute?version=1.0"
+    assert calls[0]["headers"]["X-Skypetoken"] == "skype" and calls[0]["headers"]["Authorization"].startswith("Bearer ")
+    assert {"name": "query", "value": "cat"} in calls[0]["body"] and {"name": "limit", "value": "5"} in calls[0]["body"]
+    client.get("/api/gifs/search", headers=H, params={"q": "Cat", "limit": 5})
+    assert len(calls) == 1  # cached by (query, limit)
+
+
+def test_gif_trending_is_the_command_with_an_empty_query(env, monkeypatch):
+    calls = _gif_http(monkeypatch, result=[_gif_item()])
+    assert TestClient(app).get("/api/gifs/trending", headers=H).status_code == 200
+    assert {"name": "query", "value": ""} in calls[0]["body"]
+
+
+def test_gif_search_keeps_only_giphy_urls(env, monkeypatch):
+    _gif_http(monkeypatch, result=[_gif_item("https://evil.example/giphy.gif"), {"composeValue": 7, "fieldValues": ["x"]}, "nonsense", _gif_item()])
+    assert [g["url"] for g in TestClient(app).get("/api/gifs/search", headers=H, params={"q": "cat"}).json()] == [GIF_URL]
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_a_refusal_from_teams_reads_as_no_gifs_here(env, monkeypatch, status):
+    _gif_http(monkeypatch, status=status)
+    assert TestClient(app).get("/api/gifs/search", headers=H, params={"q": "cat"}).status_code == 503
+
+
+def test_a_failing_gif_command_stays_an_error(env, monkeypatch):
+    _gif_http(monkeypatch, status=500)
+    assert TestClient(app).get("/api/gifs/search", headers=H, params={"q": "cat"}).status_code == 502
+
+
+@pytest.mark.parametrize("host", ["https://evil.example/api/mt/emea", "http://teams.microsoft.com/api/mt/emea", "https://teams.microsoft.com.evil.example/mt", ""])
+def test_the_tokens_only_go_to_a_teams_middle_tier(env, monkeypatch, host):
+    calls = _gif_http(monkeypatch, middle_tier=host)
+    assert TestClient(app).get("/api/gifs/search", headers=H, params={"q": "cat"}).status_code == 502
+    assert calls == []
+
+
+def test_gif_search_needs_a_microsoft_sign_in(env):
     client = TestClient(app)
     assert client.get("/api/gifs/search", params={"q": "cat"}).status_code == 422
     assert client.get("/api/gifs/trending").status_code == 422
@@ -398,30 +451,10 @@ def test_gif_search_needs_a_microsoft_sign_in(env, monkeypatch):
 
 def test_gif_search_is_rate_limited_per_account(env, monkeypatch):
     from tests.services import gifs
-    monkeypatch.setenv("GIPHY_API_KEY", "k")
-    monkeypatch.setattr(gifs, "_search", lambda key, query, limit: [])
+    monkeypatch.setattr(gifs, "_search", lambda broker, query, limit: [])
     client = TestClient(app)
     codes = [client.get("/api/gifs/search", headers=H, params={"q": f"q{i}"}).status_code for i in range(gifs.RATE_PER_MINUTE + 1)]
     assert codes[:-1] == [200] * gifs.RATE_PER_MINUTE and codes[-1] == 429
-
-
-def test_gif_search_returns_only_giphy_urls(env, monkeypatch):
-    from tests.services import gifs
-    calls = []
-
-    class Http:
-        def request(self, method, url, timeout=None):
-            calls.append(url)
-            assert method == "GET" and "/search?" in url and "q=cat" in url
-            return FakeResponse(200, {"data": [{"id": "g1", "title": "Cat", "images": {"downsized_medium": {"url": GIF_URL + "?cid=1", "width": "200", "height": "150"}, "fixed_width_small": {"url": GIF_URL}}}, {"id": "bad", "images": {"original": {"url": "https://evil.example/x.gif"}}}]})
-
-    monkeypatch.setenv("GIPHY_API_KEY", "k")
-    monkeypatch.setattr(gifs, "http_client", lambda: Http())
-    gifs._results.set(("cat", 5), None, 0)
-    r = TestClient(app).get("/api/gifs/search", headers=H, params={"q": "cat", "limit": 5})
-    assert r.json() == [{"id": "g1", "title": "Cat", "url": GIF_URL, "previewUrl": GIF_URL, "width": 200, "height": 150}]
-    TestClient(app).get("/api/gifs/search", headers=H, params={"q": "Cat", "limit": 5})
-    assert len(calls) == 1  # cached by (query, limit)
 
 
 def test_account_cache_expires_and_is_bounded(monkeypatch):
@@ -441,8 +474,7 @@ def test_no_response_carrying_a_token_is_cacheable(env, http, monkeypatch):
     """Every route that can hand back a rotated refresh token must forbid storing the response."""
     from tests.services import gifs
     note, _ = env
-    monkeypatch.setenv("GIPHY_API_KEY", "k")
-    monkeypatch.setattr(gifs, "_search", lambda key, query, limit: [])
+    monkeypatch.setattr(gifs, "_search", lambda broker, query, limit: [])
     monkeypatch.setattr(note, "get", lambda path, params=None, raw=False: PNG if raw == "bytes" else {"id": "me-id"})
     client = TestClient(app)
     responses = [
