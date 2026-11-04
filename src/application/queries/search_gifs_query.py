@@ -27,12 +27,12 @@ class SearchGifsHandler(IQueryHandler[SearchGifsQuery, list[dict]]):
         RefreshTokenFormat.check(query.refresh_token)
 
         def run(note, broker):
-            # Only a live Microsoft sign-in may spend the GIF key: the token must mint a Graph token (cached after the first call), and each account is rate limited.
+            # Only a live Microsoft sign-in may search: the token must mint a Graph token (cached after the first call), and each account is rate limited.
             broker(self._options.device_client_id)
             if not self._gifs.allow(broker):
                 raise ServiceError(429, "Too many GIF searches; wait a minute.", headers={"Retry-After": "60"})
             try:
-                return self._gifs.search(query.q, query.limit)
+                return self._gifs.search(broker, query.q, query.limit)
             except GifSearchUnavailable as ex:
                 raise ServiceError(503, str(ex))
             except Exception as ex:
