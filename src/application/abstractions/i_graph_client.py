@@ -14,6 +14,9 @@ class IGraphClient(ABC):
     def post(self, path, body=None, client=None): ...
 
     @abstractmethod
+    def presences(self, user_ids): ...
+
+    @abstractmethod
     def emails(self, folder="inbox", top=25, unread=False, search=None, select=None): ...
 
     @abstractmethod

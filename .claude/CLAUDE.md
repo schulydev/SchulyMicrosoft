@@ -109,7 +109,7 @@ src/
     logging_config.py         # logger names
     microsoft/                # AccountRunner, OutNoteClientFactory, BrokerCache, SharedBroker, AccountCache, MicrosoftHttpClients, DeviceLoginClient, BrowserSignInClient, ProfileReader
     graph/                    # TeamsFiles, GraphSearch, OneNoteClient, OneNoteRunner, PdfConverter, FileThumbnails, ChannelMessages, PeoplePhotos, MailFolderRoles
-    teams/                    # TeamsChatClient (skype token, AMS), ChatReader, ChatSender, EmojiCatalogue
+    teams/                    # TeamsChatClient (skype token, AMS), ChatReader, ChatSender, ChatPresence, EmojiCatalogue
     giphy/                    # GifSearch (Teams' own GIF command with the account's sign-in; 503 when Teams refuses)
     files/                    # FileTextExtractor (lazy imports, zip-bomb guard, caps, paging)
     password_signin/          # JobStore, SignInJob (worker thread per job, MfaPrompt bridge), RateLimiter

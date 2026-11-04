@@ -16,6 +16,7 @@ from src.application.queries.get_chat_file_query import GetChatFileQuery
 from src.application.queries.get_chat_file_thumbnail_query import GetChatFileThumbnailQuery
 from src.application.queries.get_chat_hosted_content_query import GetChatHostedContentQuery
 from src.application.queries.get_chat_photo_query import GetChatPhotoQuery
+from src.application.queries.get_chat_presence_query import GetChatPresenceQuery
 from src.application.queries.list_chat_messages_query import ListChatMessagesQuery
 from src.application.queries.list_chats_query import ListChatsQuery
 
@@ -66,6 +67,11 @@ class ChatsController:
     async def mark_chat_read(self, chat_id: str, token: str = Header(..., alias=HttpHeaders.REFRESH_TOKEN_HEADER)):
         await self.mediator.send(MarkChatReadCommand(token, chat_id))
         return Response(status_code=204)
+
+    @router.get("/chats/{chat_id}/presence", tags=["Microsoft 365"])
+    async def chat_presence(self, chat_id: str, token: str = Header(..., alias=HttpHeaders.REFRESH_TOKEN_HEADER)):
+        """The Teams status of the other person in a 1:1 chat: `{availability, activity}`, both null when there is none to show."""
+        return await self.mediator.send(GetChatPresenceQuery(token, chat_id))
 
     @router.get("/chats/{chat_id}/photo", tags=["Microsoft 365"], response_class=Response, responses={200: {"content": {"image/jpeg": {}}}})
     async def chat_photo(self, chat_id: str, token: str = Header(..., alias=HttpHeaders.REFRESH_TOKEN_HEADER)):
