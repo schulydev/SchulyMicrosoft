@@ -14,6 +14,9 @@ class IGraphClient(ABC):
     def post(self, path, body=None, client=None): ...
 
     @abstractmethod
+    def listen(self, reconnect=True, presence=()): ...
+
+    @abstractmethod
     def presences(self, user_ids): ...
 
     @abstractmethod
