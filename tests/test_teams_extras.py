@@ -391,7 +391,7 @@ def _gif_http(monkeypatch, status=200, result=None, middle_tier="https://teams.m
             if url == teams_chat.AUTHZ_URL:
                 return FakeResponse(200, {"tokens": {"skypeToken": "skype", "expiresIn": 4000}, "regionGtms": {"chatService": "https://ch.ng.msg.teams.microsoft.com", "middleTier": middle_tier}})
             calls.append({"url": url, "headers": headers, "body": json.loads(content)})
-            return FakeResponse(status, {"result": result or []})
+            return FakeResponse(status, {"result": [{"templateType": "grid", "result": result or []}]})
 
     monkeypatch.setattr(teams_chat, "http_client", lambda: Http())
     return calls

@@ -1,7 +1,7 @@
 """GIF search through Teams, with the account's own Microsoft sign-in and no key of our own.
 
 The Teams clients ask their middle tier for Giphy results (see `TeamsChatClient.gif_command`). The answer is a list of
-`{composeType, composeValue, fieldValues: [{fieldName, fieldValue}]}`. The route is undocumented and the names in it were
+`{composeType, composeValue, fieldValues: [{fieldName, fieldValue}]}`, nested as production showed. The route is undocumented and the names in it were
 read from Teams' client code, not from a live answer, so the GIF is found by its Giphy URL rather than by a field name.
 A GIF sends as a plain `<img itemtype="http://schema.skype.com/Giphy" src="https://media*.giphy.com/...">` in the message body.
 """

@@ -117,8 +117,9 @@ class TeamsChatClient(ITeamsChat):
             if r.status_code == 401:
                 self._drop_session(broker)
             raise ChatServiceError(r.status_code, "GIF command refused")
-        result = r.json().get("result")
-        return result if isinstance(result, list) else []
+        # The answer nests: {result: [{templateType, result: [the GIFs]}]}.
+        groups = r.json().get("result")
+        return [item for group in groups if isinstance(group, dict) and isinstance(group.get("result"), list) for item in group["result"]] if isinstance(groups, list) else []
 
     def _media_host(self, value) -> str | None:
         """The media service base URL when it is an https Microsoft media host, else None."""
