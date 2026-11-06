@@ -19,6 +19,7 @@ from src.application.queries.get_chat_photo_query import GetChatPhotoQuery
 from src.application.queries.get_chat_presence_query import GetChatPresenceQuery
 from src.application.queries.list_chat_messages_query import ListChatMessagesQuery
 from src.application.queries.list_chats_query import ListChatsQuery
+from src.application.queries.open_chat_live_query import OpenChatLiveQuery
 
 router = APIRouter(prefix="/api")
 
@@ -72,6 +73,11 @@ class ChatsController:
     async def chat_presence(self, chat_id: str, token: str = Header(..., alias=HttpHeaders.REFRESH_TOKEN_HEADER)):
         """The Teams status of the other person in a 1:1 chat: `{availability, activity}`, both null when there is none to show."""
         return await self.mediator.send(GetChatPresenceQuery(token, chat_id))
+
+    @router.get("/chats/live", tags=["Microsoft 365"], response_class=StreamingResponse, responses={200: {"content": {"application/x-ndjson": {}}}})
+    async def chats_live(self, token: str = Header(..., alias=HttpHeaders.REFRESH_TOKEN_HEADER)):
+        """Live chat events, one JSON object per line, for as long as the caller stays: `connected`, `message`, `message_updated` and `message_deleted` with `chatId` and `fromMe`, and `ping` to keep the connection up. It says what changed where and nothing else. When it ends, reconnect."""
+        return StreamingResponse(await self.mediator.send(OpenChatLiveQuery(token)), media_type="application/x-ndjson", headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
     @router.get("/chats/{chat_id}/photo", tags=["Microsoft 365"], response_class=Response, responses={200: {"content": {"image/jpeg": {}}}})
     async def chat_photo(self, chat_id: str, token: str = Header(..., alias=HttpHeaders.REFRESH_TOKEN_HEADER)):

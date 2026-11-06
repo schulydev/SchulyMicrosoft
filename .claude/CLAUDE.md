@@ -6,7 +6,7 @@ The Schuly **Microsoft plugin** is the only caller.
 
 ## What it is / isn't
 
-- **Stateless** apart from the short-lived in-memory password sign-in jobs. No database, no stored tokens. The caller owns the FOCI refresh token and
+- **Stateless** apart from the short-lived in-memory password sign-in jobs and the live chat streams, which last only as long as their request. No database, no stored tokens. The caller owns the FOCI refresh token and
   sends it back in the `X-MS-Refresh-Token` header; reads return the rotated token in the
   same response header.
 - Sign-in is the **browser sign-in** (authorization code + PKCE in a WebView, used by the
@@ -44,6 +44,7 @@ The Schuly **Microsoft plugin** is the only caller.
 - `AccountRunner` strips `_native` from every result. No route calls OutNote's native reads today: chat
   messages stay on Graph's list because `ChatReader` and the callers need its attachments, mentions and
   reactions. `emails()` gets an explicit `$select` because the web's list shows `toRecipients`.
+- `GET /api/chats/live` (`ChatLive`) runs `note.listen(reconnect=False)` in a daemon thread for as long as the caller stays, so one thread and one Teams connection per open chat page, capped per process and per account. `listen()` stops only on `close()`, so the stream's `finally` must reach it. It forwards only `{kind, chatId, fromMe}` for messages, edits and deletions: no content, typing or presence. The route is undocumented and has no Graph fallback; the web app polls while it is down.
 - Never add `SQLiteCache` or any other on-disk cache. `stream()` cursors would have to live in the plugin.
 
 ## Cold start
@@ -109,7 +110,7 @@ src/
     logging_config.py         # logger names
     microsoft/                # AccountRunner, OutNoteClientFactory, BrokerCache, SharedBroker, AccountCache, MicrosoftHttpClients, DeviceLoginClient, BrowserSignInClient, ProfileReader
     graph/                    # TeamsFiles, GraphSearch, OneNoteClient, OneNoteRunner, PdfConverter, FileThumbnails, ChannelMessages, PeoplePhotos, MailFolderRoles
-    teams/                    # TeamsChatClient (skype token, AMS), ChatReader, ChatSender, ChatPresence, EmojiCatalogue
+    teams/                    # TeamsChatClient (skype token, AMS), ChatReader, ChatSender, ChatLive, ChatPresence, EmojiCatalogue
     giphy/                    # GifSearch (Teams' own GIF command with the account's sign-in; 503 when Teams refuses)
     files/                    # FileTextExtractor (lazy imports, zip-bomb guard, caps, paging)
     password_signin/          # JobStore, SignInJob (worker thread per job, MfaPrompt bridge), RateLimiter
