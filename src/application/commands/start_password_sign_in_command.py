@@ -35,6 +35,6 @@ class StartPasswordSignInHandler(ICommandHandler[StartPasswordSignInCommand, Pas
             del password
         await self._store.wait_settled(job, -1, self.SIGN_IN_WAIT)
         snap = job.snapshot()
-        if snap["state"] != SignInState.WORKING and snap.get("code") != "invalid_credentials":
+        if snap["state"] != SignInState.WORKING and snap.get("code") not in SignInState.PASSWORD_REFUSED:
             self._store.promote(job)  # the password passed: this replaces the user's earlier attempt
         return await self._responder.respond(job)

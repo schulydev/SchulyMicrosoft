@@ -6,3 +6,4 @@ class SignInState:
     DENIED, TIMED_OUT, COMPLETE, ERROR = "denied", "timed_out", "complete", "error"
     TRANSIENT = {WORKING, STARTING_PUSH, STARTING_OTP, VERIFYING}
     CHOOSABLE = {MFA_REQUIRED, DENIED, TIMED_OUT}  # states where /method picks a (new) method
+    PASSWORD_REFUSED = frozenset({"invalid_credentials", "password_expired", "no_password"})  # error codes for "Microsoft did not take the password"

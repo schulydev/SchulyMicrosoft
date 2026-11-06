@@ -12,5 +12,5 @@ class PasswordSignInResponse(BaseModel):
     attempts_left: int | None = None
     refresh_token: str | None = None
     account: LinkedIdentity | None = None
-    code: str | None = Field(None, description="error: invalid_credentials | unsupported | blocked | rate_limited | failed")
+    code: str | None = Field(None, description="error: invalid_credentials (wrong email or password) | password_expired (change it at office.com first) | no_password (passwordless account: use the app's Microsoft sign-in) | unsupported | blocked | otp_exhausted | rate_limited | failed")
     message: str | None = None

@@ -31,6 +31,8 @@ class SignInJob(MfaPrompt, ISignInJob):
     OTP_ATTEMPTS = entrance.OTP_ATTEMPTS
     MESSAGES = {
         "invalid_credentials": "Wrong email or password.",
+        "password_expired": "Your Microsoft password has expired. Change it at office.com, then try again.",
+        "no_password": "This Microsoft account has no password. Sign in with the Schuly app instead.",
         "unsupported": "This Microsoft account can't be signed in with a password here.",
         "blocked": "Microsoft blocked this sign-in because of a security policy.",
         "failed": "The Microsoft sign-in failed.",
@@ -72,7 +74,11 @@ class SignInJob(MfaPrompt, ISignInJob):
     def failure_for(cls, ex: BaseException) -> tuple[str, str]:
         """Map a sign-in exception to a stable (code, message). Only the exception TYPE decides; the
         exception text is never copied into a response."""
-        if isinstance(ex, entrance.InvalidCredentials):
+        if isinstance(ex, entrance.PasswordExpired):
+            code = "password_expired"
+        elif isinstance(ex, entrance.NoPassword):
+            code = "no_password"
+        elif isinstance(ex, entrance.InvalidCredentials):
             code = "invalid_credentials"
         elif isinstance(ex, entrance.OtpRejected):
             code = "otp_exhausted"
@@ -83,6 +89,12 @@ class SignInJob(MfaPrompt, ISignInJob):
         else:
             code = "failed"
         return code, cls.MESSAGES[code]
+
+    @staticmethod
+    def aadsts_of(ex: BaseException) -> str:
+        """The AADSTS number Microsoft gave for a failed sign-in, digits only, or "-" when it named none."""
+        code = getattr(ex, "code", None) if isinstance(ex, entrance.LoginFailed) else None
+        return code if isinstance(code, str) and code.isdigit() and len(code) <= 10 else "-"
 
     # -- state ---------------------------------------------------------------------------------
     def _set(self, state: str, **fields):
@@ -227,7 +239,7 @@ class SignInJob(MfaPrompt, ISignInJob):
             code, message = self.failure_for(ex)
             if code == "invalid_credentials":
                 self._failures.add(self.acct)  # only failed password attempts count against the limiter
-            self.log.warning("password sign-in %s ended: %s (%s)", self.id, code, type(ex).__name__)
+            self.log.warning("password sign-in %s ended: %s (%s, AADSTS %s)", self.id, code, type(ex).__name__, self.aadsts_of(ex))
             with self.cond:
                 self.done_at = time.monotonic()
                 self._set(SignInState.ERROR, error_code=code, error_message=message)
