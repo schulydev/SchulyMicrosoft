@@ -17,7 +17,7 @@ class PasswordSignInResponder:
         if state == SignInState.COMPLETE:
             if job.account is None:
                 job.account = await self._identities.read(snap["refresh_token"])
-            return PasswordSignInResponse(**base, status="complete", refresh_token=snap["refresh_token"], account=job.account)
+            return PasswordSignInResponse(**base, status="complete", refresh_token=snap["refresh_token"], session_cookies=snap.get("session_cookies") or None, account=job.account)
         if state == SignInState.ERROR:
             return PasswordSignInResponse(**base, status="error", code=snap["code"], message=snap["message"])
         if state == SignInState.PUSH_PENDING:

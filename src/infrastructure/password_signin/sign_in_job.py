@@ -20,6 +20,7 @@ from entrance import MfaCancelled, MfaPrompt, MfaSwitch, Secret
 
 from src.application.abstractions.i_sign_in_job import ISignInJob
 from src.application.options.password_sign_in_options import PasswordSignInOptions
+from src.domain.sign_in.session_cookies import SessionCookies
 from src.domain.sign_in.sign_in_state import SignInState
 from src.infrastructure.logging_config import LoggerNames
 from src.infrastructure.password_signin.rate_limiter import RateLimiter
@@ -31,6 +32,8 @@ class SignInJob(MfaPrompt, ISignInJob):
     OTP_ATTEMPTS = entrance.OTP_ATTEMPTS
     MESSAGES = {
         "invalid_credentials": "Wrong email or password.",
+        "password_expired": "Your Microsoft password has expired. Change it at office.com, then try again.",
+        "no_password": "This Microsoft account has no password. Sign in with the Schuly app instead.",
         "unsupported": "This Microsoft account can't be signed in with a password here.",
         "blocked": "Microsoft blocked this sign-in because of a security policy.",
         "failed": "The Microsoft sign-in failed.",
@@ -62,6 +65,7 @@ class SignInJob(MfaPrompt, ISignInJob):
         self.requested: str | None = None
         self.code: str | None = None  # a one-time authenticator code, taken (cleared) by the worker
         self.refresh_token: str | None = None
+        self.session_cookies: list[dict[str, str]] = []  # the Microsoft sign-in session, handed to the caller like the refresh token
         self.account = None
         self.error_code: str | None = None
         self.error_message: str | None = None
@@ -72,7 +76,11 @@ class SignInJob(MfaPrompt, ISignInJob):
     def failure_for(cls, ex: BaseException) -> tuple[str, str]:
         """Map a sign-in exception to a stable (code, message). Only the exception TYPE decides; the
         exception text is never copied into a response."""
-        if isinstance(ex, entrance.InvalidCredentials):
+        if isinstance(ex, entrance.PasswordExpired):
+            code = "password_expired"
+        elif isinstance(ex, entrance.NoPassword):
+            code = "no_password"
+        elif isinstance(ex, entrance.InvalidCredentials):
             code = "invalid_credentials"
         elif isinstance(ex, entrance.OtpRejected):
             code = "otp_exhausted"
@@ -83,6 +91,12 @@ class SignInJob(MfaPrompt, ISignInJob):
         else:
             code = "failed"
         return code, cls.MESSAGES[code]
+
+    @staticmethod
+    def aadsts_of(ex: BaseException) -> str:
+        """The AADSTS number Microsoft gave for a failed sign-in, digits only, or "-" when it named none."""
+        code = getattr(ex, "code", None) if isinstance(ex, entrance.LoginFailed) else None
+        return code if isinstance(code, str) and code.isdigit() and len(code) <= 10 else "-"
 
     # -- state ---------------------------------------------------------------------------------
     def _set(self, state: str, **fields):
@@ -131,6 +145,7 @@ class SignInJob(MfaPrompt, ISignInJob):
                 snap["otp_invalid"] = self.otp_invalid
             if self.state == SignInState.COMPLETE:
                 snap["refresh_token"] = self.refresh_token
+                snap["session_cookies"] = list(self.session_cookies)
             if self.state == SignInState.ERROR:
                 snap["code"], snap["message"] = self.error_code, self.error_message
             return snap
@@ -220,14 +235,14 @@ class SignInJob(MfaPrompt, ISignInJob):
             broker = entrance.foci_login(username, secret, cookies=None, frt_store=None, mfa=self, push_timeout=self._options.push_timeout, push_interval=self._options.push_interval)
             with self.cond:
                 self.done_at = time.monotonic()
-                self._set(SignInState.COMPLETE, refresh_token=broker.refresh_token)
+                self._set(SignInState.COMPLETE, refresh_token=broker.refresh_token, session_cookies=SessionCookies.sign_in_only(getattr(broker, "session_cookies", None)))
         except MfaCancelled:
             self.log.info("password sign-in %s cancelled", self.id)
         except BaseException as ex:  # noqa: BLE001 - the worker must always end in a terminal state
             code, message = self.failure_for(ex)
             if code == "invalid_credentials":
                 self._failures.add(self.acct)  # only failed password attempts count against the limiter
-            self.log.warning("password sign-in %s ended: %s (%s)", self.id, code, type(ex).__name__)
+            self.log.warning("password sign-in %s ended: %s (%s, AADSTS %s)", self.id, code, type(ex).__name__, self.aadsts_of(ex))
             with self.cond:
                 self.done_at = time.monotonic()
                 self._set(SignInState.ERROR, error_code=code, error_message=message)

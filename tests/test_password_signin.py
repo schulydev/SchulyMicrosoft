@@ -5,6 +5,7 @@ import json
 import logging
 import threading
 import time
+from types import SimpleNamespace
 
 import entrance
 import pytest
@@ -25,8 +26,20 @@ class FakeNote:
 
 
 class FakeBroker:
-    def __init__(self, refresh_token="frt-new"):
+    def __init__(self, refresh_token="frt-new", session_cookies=None):
         self.refresh_token = refresh_token
+        self.session_cookies = session_cookies or []
+
+
+FAKE_ESTS = "fake-ests-cookie-value"
+SIGN_IN_JAR = [
+    {"name": "ESTSAUTHPERSISTENT", "value": FAKE_ESTS, "domain": ".login.microsoftonline.com", "path": "/"},
+    {"name": "buid", "value": "fake-buid", "domain": "login.microsoftonline.com", "path": ""},
+    {"name": "MSPAuth", "value": "fake-msp", "domain": "LOGIN.LIVE.COM", "path": "/ppsecure"},
+    {"name": "OH.SID", "value": "fake-other", "domain": ".www.office.com", "path": "/"},
+    {"name": "", "value": "no-name", "domain": "login.microsoft.com", "path": "/"},
+    {"name": "nul", "value": None, "domain": "login.microsoft.com", "path": "/"},
+]
 
 
 KEY = "test-service-key"
@@ -240,7 +253,11 @@ def test_method_to_the_current_method_is_a_no_op(api, monkeypatch):
 @pytest.mark.parametrize(
     "error, code",
     [
-        (entrance.InvalidCredentials("Wrong username or password"), "invalid_credentials"),
+        (entrance.InvalidCredentials("Wrong username or password", code="50126"), "invalid_credentials"),
+        (entrance.AccountNotFound("No account with that username"), "invalid_credentials"),
+        (entrance.PasswordExpired("expired", code="50144"), "password_expired"),
+        (entrance.PasswordExpired("expired", code="50055"), "password_expired"),
+        (entrance.NoPassword("no password", code="50056"), "no_password"),
         (entrance.FederatedAccount(redirect_url="https://adfs.school.ch/adfs"), "unsupported"),
         (entrance.UnsupportedMfa("only sms", offered=["OneWaySMS"]), "unsupported"),
         (entrance.Blocked("blocked", code="53003"), "blocked"),
@@ -257,6 +274,40 @@ def test_failures_map_to_stable_codes(api, monkeypatch, error, code):
     assert body["status"] == "error" and body["code"] == code
     assert body["message"] == SignInJob.MESSAGES[code]
     assert "refresh_token" not in body
+
+
+@pytest.mark.parametrize(
+    "error, logged",
+    [
+        (entrance.PasswordExpired("expired", code="50144"), "password_expired (PasswordExpired, AADSTS 50144)"),
+        (entrance.InvalidCredentials("Wrong username or password", code="50126"), "invalid_credentials (InvalidCredentials, AADSTS 50126)"),
+        (entrance.AccountNotFound("No account with that username"), "invalid_credentials (AccountNotFound, AADSTS -)"),
+        (entrance.LoginFailed("odd", code=USER), "failed (LoginFailed, AADSTS -)"),
+        (RuntimeError("boom"), "failed (RuntimeError, AADSTS -)"),
+    ],
+)
+def test_failure_logs_the_aadsts_number_only(api, monkeypatch, caplog, error, logged):
+    caplog.set_level(logging.INFO)
+
+    def fail(prompt):
+        raise error
+
+    scripted(monkeypatch, fail)
+    start(api)
+    assert logged in caplog.text
+    assert USER not in caplog.text and PASSWORD not in caplog.text
+
+
+@pytest.mark.parametrize("error", [entrance.PasswordExpired("expired", code="50144"), entrance.NoPassword("none", code="50056")])
+def test_refused_password_does_not_count_or_replace(api, monkeypatch, error):
+    monkeypatch.setattr(sign_in_options, "account_limit", 1)
+
+    def fail(prompt):
+        raise error
+
+    scripted(monkeypatch, fail)
+    for _ in range(3):  # not a wrong password, so the failure limiter stays untouched
+        assert start(api).json()["code"] in ("password_expired", "no_password")
 
 
 def test_failure_after_choosing_a_method(api, monkeypatch):
@@ -553,7 +604,8 @@ class _MsSession:
 
     def __init__(self, *a, **k):
         self.headers = {}
-        self.cookies = type("J", (), {"jar": [], "set": lambda *a, **k: None})()
+        jar = [SimpleNamespace(name="ESTSAUTH", value="fake-real-ests", domain=".login.microsoftonline.com", path="/")]
+        self.cookies = type("J", (), {"jar": jar, "set": lambda *a, **k: None})()
         self.polls = 0
 
     def get(self, url, **kw):
@@ -603,6 +655,33 @@ def real_entrance(monkeypatch):
     monkeypatch.setattr(ef, "_post_token", lambda url, data: {"refresh_token": "real-frt", "access_token": "at"})
 
 
+def test_complete_hands_back_only_the_sign_in_cookies(api, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    scripted(monkeypatch, lambda p: FakeBroker(session_cookies=SIGN_IN_JAR))
+    body = start(api).json()
+    assert body["status"] == "complete"
+    assert body["session_cookies"] == [
+        {"domain": "login.microsoftonline.com", "name": "ESTSAUTHPERSISTENT", "path": "/", "value": FAKE_ESTS},
+        {"domain": "login.microsoftonline.com", "name": "buid", "path": "/", "value": "fake-buid"},
+        {"domain": "login.live.com", "name": "MSPAuth", "path": "/ppsecure", "value": "fake-msp"},
+    ]
+    assert FAKE_ESTS not in caplog.text
+
+
+def test_complete_without_cookies_leaves_the_field_out(api, monkeypatch):
+    scripted(monkeypatch, lambda p: FakeBroker())
+    body = start(api).json()
+    assert body["status"] == "complete" and "session_cookies" not in body
+
+
+def test_a_failed_sign_in_hands_back_no_cookies(api, monkeypatch):
+    def fail(prompt):
+        raise entrance.InvalidCredentials("Wrong username or password", code="50126")
+
+    scripted(monkeypatch, fail)
+    assert "session_cookies" not in start(api).json()
+
+
 def test_real_entrance_push(api, real_entrance):
     body = start(api).json()
     assert body["status"] == "mfa_required" and body["methods"] == BOTH
@@ -612,6 +691,7 @@ def test_real_entrance_push(api, real_entrance):
     _MsSession.gate.set()
     done = until(api, sid, "complete")
     assert done["refresh_token"] == "real-frt" and done["account"]["email"] == USER
+    assert done["session_cookies"] == [{"domain": "login.microsoftonline.com", "name": "ESTSAUTH", "path": "/", "value": "fake-real-ests"}]
     assert not reaches(sign_in_store, PASSWORD)
 
 
