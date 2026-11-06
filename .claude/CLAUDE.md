@@ -20,6 +20,9 @@ The Schuly **Microsoft plugin** is the only caller.
   never the password, so the service **must run as ONE process** (`asgi.py` pins `workers=1`; do not
   add uvicorn/gunicorn workers or replicas). Keep the password out of logs, job objects, errors
   and responses (the 422 handler for `/api/auth/password*` strips the echoed input on purpose).
+- A completed password sign-in also returns `session_cookies`: Entrance's `Broker.session_cookies`, filtered to
+  Microsoft's sign-in hosts (`SessionCookies`) in the WebView capture's `{domain, name, path, value}` shape. Schulnetz
+  needs them to sign in with the linked account. They are a credential like the refresh token: never log them.
 - Uses only the **public** OutNote/Entrance API (`outnote.OutNote`, `entrance.Broker`,
   `entrance.http_client`) plus the documented OAuth calls for the browser and device flows. Don't
   reach into their private modules. Needs Python 3.11 or newer. The one non-Graph surface is the Teams chat service for group

@@ -5,6 +5,7 @@ import json
 import logging
 import threading
 import time
+from types import SimpleNamespace
 
 import entrance
 import pytest
@@ -25,8 +26,20 @@ class FakeNote:
 
 
 class FakeBroker:
-    def __init__(self, refresh_token="frt-new"):
+    def __init__(self, refresh_token="frt-new", session_cookies=None):
         self.refresh_token = refresh_token
+        self.session_cookies = session_cookies or []
+
+
+FAKE_ESTS = "fake-ests-cookie-value"
+SIGN_IN_JAR = [
+    {"name": "ESTSAUTHPERSISTENT", "value": FAKE_ESTS, "domain": ".login.microsoftonline.com", "path": "/"},
+    {"name": "buid", "value": "fake-buid", "domain": "login.microsoftonline.com", "path": ""},
+    {"name": "MSPAuth", "value": "fake-msp", "domain": "LOGIN.LIVE.COM", "path": "/ppsecure"},
+    {"name": "OH.SID", "value": "fake-other", "domain": ".www.office.com", "path": "/"},
+    {"name": "", "value": "no-name", "domain": "login.microsoft.com", "path": "/"},
+    {"name": "nul", "value": None, "domain": "login.microsoft.com", "path": "/"},
+]
 
 
 KEY = "test-service-key"
@@ -591,7 +604,8 @@ class _MsSession:
 
     def __init__(self, *a, **k):
         self.headers = {}
-        self.cookies = type("J", (), {"jar": [], "set": lambda *a, **k: None})()
+        jar = [SimpleNamespace(name="ESTSAUTH", value="fake-real-ests", domain=".login.microsoftonline.com", path="/")]
+        self.cookies = type("J", (), {"jar": jar, "set": lambda *a, **k: None})()
         self.polls = 0
 
     def get(self, url, **kw):
@@ -641,6 +655,33 @@ def real_entrance(monkeypatch):
     monkeypatch.setattr(ef, "_post_token", lambda url, data: {"refresh_token": "real-frt", "access_token": "at"})
 
 
+def test_complete_hands_back_only_the_sign_in_cookies(api, monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG)
+    scripted(monkeypatch, lambda p: FakeBroker(session_cookies=SIGN_IN_JAR))
+    body = start(api).json()
+    assert body["status"] == "complete"
+    assert body["session_cookies"] == [
+        {"domain": "login.microsoftonline.com", "name": "ESTSAUTHPERSISTENT", "path": "/", "value": FAKE_ESTS},
+        {"domain": "login.microsoftonline.com", "name": "buid", "path": "/", "value": "fake-buid"},
+        {"domain": "login.live.com", "name": "MSPAuth", "path": "/ppsecure", "value": "fake-msp"},
+    ]
+    assert FAKE_ESTS not in caplog.text
+
+
+def test_complete_without_cookies_leaves_the_field_out(api, monkeypatch):
+    scripted(monkeypatch, lambda p: FakeBroker())
+    body = start(api).json()
+    assert body["status"] == "complete" and "session_cookies" not in body
+
+
+def test_a_failed_sign_in_hands_back_no_cookies(api, monkeypatch):
+    def fail(prompt):
+        raise entrance.InvalidCredentials("Wrong username or password", code="50126")
+
+    scripted(monkeypatch, fail)
+    assert "session_cookies" not in start(api).json()
+
+
 def test_real_entrance_push(api, real_entrance):
     body = start(api).json()
     assert body["status"] == "mfa_required" and body["methods"] == BOTH
@@ -650,6 +691,7 @@ def test_real_entrance_push(api, real_entrance):
     _MsSession.gate.set()
     done = until(api, sid, "complete")
     assert done["refresh_token"] == "real-frt" and done["account"]["email"] == USER
+    assert done["session_cookies"] == [{"domain": "login.microsoftonline.com", "name": "ESTSAUTH", "path": "/", "value": "fake-real-ests"}]
     assert not reaches(sign_in_store, PASSWORD)
 
 

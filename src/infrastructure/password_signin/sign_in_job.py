@@ -20,6 +20,7 @@ from entrance import MfaCancelled, MfaPrompt, MfaSwitch, Secret
 
 from src.application.abstractions.i_sign_in_job import ISignInJob
 from src.application.options.password_sign_in_options import PasswordSignInOptions
+from src.domain.sign_in.session_cookies import SessionCookies
 from src.domain.sign_in.sign_in_state import SignInState
 from src.infrastructure.logging_config import LoggerNames
 from src.infrastructure.password_signin.rate_limiter import RateLimiter
@@ -64,6 +65,7 @@ class SignInJob(MfaPrompt, ISignInJob):
         self.requested: str | None = None
         self.code: str | None = None  # a one-time authenticator code, taken (cleared) by the worker
         self.refresh_token: str | None = None
+        self.session_cookies: list[dict[str, str]] = []  # the Microsoft sign-in session, handed to the caller like the refresh token
         self.account = None
         self.error_code: str | None = None
         self.error_message: str | None = None
@@ -143,6 +145,7 @@ class SignInJob(MfaPrompt, ISignInJob):
                 snap["otp_invalid"] = self.otp_invalid
             if self.state == SignInState.COMPLETE:
                 snap["refresh_token"] = self.refresh_token
+                snap["session_cookies"] = list(self.session_cookies)
             if self.state == SignInState.ERROR:
                 snap["code"], snap["message"] = self.error_code, self.error_message
             return snap
@@ -232,7 +235,7 @@ class SignInJob(MfaPrompt, ISignInJob):
             broker = entrance.foci_login(username, secret, cookies=None, frt_store=None, mfa=self, push_timeout=self._options.push_timeout, push_interval=self._options.push_interval)
             with self.cond:
                 self.done_at = time.monotonic()
-                self._set(SignInState.COMPLETE, refresh_token=broker.refresh_token)
+                self._set(SignInState.COMPLETE, refresh_token=broker.refresh_token, session_cookies=SessionCookies.sign_in_only(getattr(broker, "session_cookies", None)))
         except MfaCancelled:
             self.log.info("password sign-in %s cancelled", self.id)
         except BaseException as ex:  # noqa: BLE001 - the worker must always end in a terminal state
